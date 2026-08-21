@@ -1,4 +1,4 @@
-/* ffconf.h -- FatFs R0.15 configuration for fruitjam-coleco */
+/* ffconf.h -- FatFs R0.15 configuration for Adafruit_ColecoJam */
 #define FFCONF_DEF	80286
 
 #define FF_FS_READONLY	0

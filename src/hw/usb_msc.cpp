@@ -60,7 +60,7 @@ void tud_msc_inquiry_cb(uint8_t lun, uint8_t vendor_id[8],
                         uint8_t product_id[16], uint8_t product_rev[4]) {
     (void)lun;
     memcpy(vendor_id,   "Adafruit", 8);
-    memcpy(product_id,  "FruitJamColeco  ", 16);
+    memcpy(product_id,  "ColecoJam       ", 16);
     memcpy(product_rev, "1.0 ", 4);
 }
 

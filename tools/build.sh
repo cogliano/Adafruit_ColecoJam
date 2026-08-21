@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build fruitjam-coleco and leave the UF2 at build/fruitjam-coleco.uf2
+# Build Adafruit_ColecoJam and leave the UF2 at build/Adafruit_ColecoJam.uf2
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -26,5 +26,5 @@ cmake -S "$ROOT" -B "$ROOT/build" \
 cmake --build "$ROOT/build" --parallel "$(nproc 2>/dev/null || echo 4)"
 
 echo
-echo "Built: $ROOT/build/fruitjam-coleco.uf2"
-ls -lh "$ROOT/build/fruitjam-coleco.uf2"
+echo "Built: $ROOT/build/Adafruit_ColecoJam.uf2"
+ls -lh "$ROOT/build/Adafruit_ColecoJam.uf2"

@@ -1,6 +1,6 @@
 // z80.h -- Zilog Z80A / NEC uPD780C CPU core
 //
-// Part of fruitjam-coleco. Structure and behaviour follow the Gearcoleco
+// Part of Adafruit_ColecoJam. Structure and behaviour follow the Gearcoleco
 // (https://github.com/drhelius/Gearcoleco) Z80 core, reimplemented here as a
 // flat C-style interpreter so that the hot loop fits comfortably in RP2350
 // SRAM/XIP cache.

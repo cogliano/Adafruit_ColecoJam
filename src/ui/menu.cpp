@@ -167,7 +167,7 @@ static void draw_frame(int selected, int scroll, const char *status,
     {
         // Title line carries the build ID so a stale flash is obvious.
         char sub[48];
-        snprintf(sub, sizeof(sub), "ColecoVision - Fruit Jam - %s", FJC_BUILD_ID);
+        snprintf(sub, sizeof(sub), "Adafruit ColecoJam - %s", ACJ_BUILD_ID);
         draw_text_centered(1, sub, COL_TITLE_FG, COL_TITLE_BG, false);
     }
 

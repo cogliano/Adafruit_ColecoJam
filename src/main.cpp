@@ -1,4 +1,4 @@
-// main.cpp -- fruitjam-coleco entry point
+// main.cpp -- Adafruit_ColecoJam entry point
 //
 // Boot sequence
 //   1. Clock to 252 MHz, bring up HSTX DVI, show a splash.
@@ -425,7 +425,7 @@ int main(void) {
     video_init();
 #endif
     blink(3);                       // video up (or skipped)
-    menu_message("FRUIT JAM COLECOVISION", "Starting up...", nullptr, false);
+    menu_message("ADAFRUIT COLECOJAM", "Starting up...", nullptr, false);
 
     // Core 1 brings up the USB host and audio. Wait for the host stack so a
     // hang there still shows as a missing blink rather than surfacing later.
@@ -448,7 +448,7 @@ int main(void) {
         fatal(9, "Could not mount the SD card.", "Format it as FAT32 and retry.");
 
     // --- BIOS ------------------------------------------------------------
-    menu_message("FRUIT JAM COLECOVISION", "Loading COLECO.BIN...", nullptr, false);
+    menu_message("ADAFRUIT COLECOJAM", "Loading COLECO.BIN...", nullptr, false);
     uint32_t bios_len = load_file(COLECO_BIOS_FILE, bios_rom, sizeof(bios_rom));
     if (bios_len < CV_BIOS_SIZE)
         fatal(5, "coleco/COLECO.BIN is missing or short.",
@@ -461,7 +461,7 @@ int main(void) {
 
     // --- Cartridge shield takes priority over the SD card ----------------
 #if ENABLE_CART_READER
-    menu_message("FRUIT JAM COLECOVISION", "Checking cartridge slot...", nullptr, false);
+    menu_message("ADAFRUIT COLECOJAM", "Checking cartridge slot...", nullptr, false);
     if (cart_present()) {
         menu_message("CARTRIDGE DETECTED", "Reading cartridge ROM...", nullptr, false);
         cart_len = cart_read(cart_rom, sizeof(cart_rom));
@@ -477,13 +477,13 @@ int main(void) {
     // --- ROM browser -----------------------------------------------------
     // Each stage updates the screen, so if it stops the last message on the
     // display names the exact step rather than leaving an earlier one frozen.
-    menu_message("FRUIT JAM COLECOVISION", "Scanning /coleco for ROMs...", nullptr, false);
+    menu_message("ADAFRUIT COLECOJAM", "Scanning /coleco for ROMs...", nullptr, false);
     int n = menu_scan_roms();
     if (n < 0)
         fatal(7, "No /coleco folder on the SD card.",
               "Create it and copy your .ROM files in.");
 
-    menu_message("FRUIT JAM COLECOVISION", "Starting cartridge browser...",
+    menu_message("ADAFRUIT COLECOJAM", "Starting cartridge browser...",
                  "If this sticks, USB host is hanging.", false);
 
     char path[MAX_FILENAME_LEN + 16];

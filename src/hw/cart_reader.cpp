@@ -1,4 +1,4 @@
-// cart_reader.cpp -- Fruit Jam ColecoVision cartridge reader shield
+// cart_reader.cpp -- Adafruit ColecoJam cartridge reader shield
 //
 // Reference design (CircuitPython):
 //   https://github.com/cogliano/Fruit_Jam_ColecoVision_Cartridge_Reader

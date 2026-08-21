@@ -26,7 +26,7 @@ set(PICO_PLATFORM rp2350-arm-s     CACHE STRING "Target platform")
 
 include(pico_sdk_import.cmake)
 
-project(fruitjam_coleco C CXX ASM)
+project(Adafruit_ColecoJam C CXX ASM)
 
 pico_sdk_init()
 
@@ -50,7 +50,7 @@ if(NOT EXISTS ${PIO_USB_DIR}/src/pio_usb.c)
 endif()
 
 # --- Executable ------------------------------------------------------------
-add_executable(fruitjam_coleco
+add_executable(colecojam
     src/main.cpp
 
     src/emu/z80.cpp
@@ -72,10 +72,10 @@ add_executable(fruitjam_coleco
     ${FATFS_DIR}/ffunicode.c
 )
 
-pico_generate_pio_header(fruitjam_coleco
+pico_generate_pio_header(colecojam
     ${CMAKE_CURRENT_LIST_DIR}/src/hw/audio_i2s.pio)
 
-target_include_directories(fruitjam_coleco PRIVATE
+target_include_directories(colecojam PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/include
     ${CMAKE_CURRENT_LIST_DIR}/src
     ${CMAKE_CURRENT_LIST_DIR}/src/emu
@@ -84,7 +84,7 @@ target_include_directories(fruitjam_coleco PRIVATE
     ${FATFS_DIR}
 )
 
-target_compile_definitions(fruitjam_coleco PRIVATE
+target_compile_definitions(colecojam PRIVATE
     # Required whenever Pico-PIO-USB is driven by TinyUSB rather than used
     # standalone. It switches pio_usb over to TinyUSB's memory and interrupt
     # ownership; without it tuh_init() can hang outright.
@@ -95,7 +95,7 @@ target_compile_definitions(fruitjam_coleco PRIVATE
     PICO_XOSC_STARTUP_DELAY_MULTIPLIER=64
 )
 
-target_compile_options(fruitjam_coleco PRIVATE
+target_compile_options(colecojam PRIVATE
     -O3
     -Wall
     -Wno-unused-function
@@ -103,7 +103,7 @@ target_compile_options(fruitjam_coleco PRIVATE
     -fdata-sections
 )
 
-target_link_libraries(fruitjam_coleco
+target_link_libraries(colecojam
     pico_stdlib
     pico_multicore
     pico_unique_id
@@ -124,10 +124,10 @@ target_link_libraries(fruitjam_coleco
 # MSC *device* and the host lives on PIO-USB. tinyusb_host_base omits the
 # native HCD and is what working Fruit Jam projects link.
 if(TARGET tinyusb_host_base)
-    target_link_libraries(fruitjam_coleco tinyusb_host_base tinyusb_common)
+    target_link_libraries(colecojam tinyusb_host_base tinyusb_common)
 else()
     message(WARNING "tinyusb_host_base not found; falling back to tinyusb_host")
-    target_link_libraries(fruitjam_coleco tinyusb_host)
+    target_link_libraries(colecojam tinyusb_host)
 endif()
 
 # HSTX is register-header-only in the Pico SDK -- hardware/structs/hstx_ctrl.h
@@ -135,7 +135,7 @@ endif()
 # library to link. Naming one anyway makes CMake pass it through to the linker
 # as -lhardware_hstx, which fails. Link it only if a future SDK adds the target.
 if(TARGET hardware_hstx)
-    target_link_libraries(fruitjam_coleco hardware_hstx)
+    target_link_libraries(colecojam hardware_hstx)
 endif()
 
 # --- Pico-PIO-USB ----------------------------------------------------------
@@ -145,7 +145,7 @@ endif()
 # hang tuh_init().
 add_subdirectory(${PIO_USB_DIR} pico_pio_usb)
 
-target_link_libraries(fruitjam_coleco pico_pio_usb)
+target_link_libraries(colecojam pico_pio_usb)
 
 # Silence -Wattributes on Pico-PIO-USB's own sources.
 #
@@ -198,15 +198,15 @@ if(NEED_PIO_HCD)
             "Could not find hcd_pio_usb.c at:\n  ${TUSB_PIO_HCD}\n"
             "Check that PICO_TINYUSB_PATH points at your pico-sdk/lib/tinyusb.")
     endif()
-    target_sources(fruitjam_coleco PRIVATE ${TUSB_PIO_HCD})
-    message(STATUS "fruitjam-coleco: adding TinyUSB PIO host driver")
+    target_sources(colecojam PRIVATE ${TUSB_PIO_HCD})
+    message(STATUS "Adafruit_ColecoJam: adding TinyUSB PIO host driver")
 endif()
 
 # ffsystem.c supplies ff_memalloc/ff_memfree. With FF_USE_LFN 1 we no longer
 # need them, but compile it when present so raising FF_USE_LFN back to 3 does
 # not silently break the link. --gc-sections drops it if unused.
 if(EXISTS ${FATFS_DIR}/ffsystem.c)
-    target_sources(fruitjam_coleco PRIVATE ${FATFS_DIR}/ffsystem.c)
+    target_sources(colecojam PRIVATE ${FATFS_DIR}/ffsystem.c)
 endif()
 
 # Keep the FatFs config in sync. fetch_deps.sh only copies ffconf.h on the
@@ -227,15 +227,15 @@ if(TARGET tinyusb_host)
 endif()
 
 # --- Output ----------------------------------------------------------------
-pico_add_extra_outputs(fruitjam_coleco)     # produces .uf2, .elf, .bin, .hex
+pico_add_extra_outputs(colecojam)     # produces .uf2, .elf, .bin, .hex
 
 # Serial debug goes out the UART pins on the 2x16 header, since USB is busy.
-pico_enable_stdio_usb(fruitjam_coleco 0)
-pico_enable_stdio_uart(fruitjam_coleco 1)
+pico_enable_stdio_usb(colecojam 0)
+pico_enable_stdio_uart(colecojam 1)
 
 # Rename the .uf2 to something recognisable on the RP2350 bootloader drive.
-add_custom_command(TARGET fruitjam_coleco POST_BUILD
+add_custom_command(TARGET colecojam POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy
-        $<TARGET_FILE_DIR:fruitjam_coleco>/fruitjam_coleco.uf2
-        ${CMAKE_CURRENT_LIST_DIR}/build/adafruit_colecojam.uf2
-    COMMENT "UF2 written to build/fruitjam-coleco.uf2")
+        $<TARGET_FILE_DIR:colecojam>/colecojam.uf2
+        ${CMAKE_CURRENT_LIST_DIR}/build/Adafruit_ColecoJam.uf2
+    COMMENT "UF2 written to build/Adafruit_ColecoJam.uf2")

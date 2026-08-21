@@ -62,7 +62,7 @@ static char serial_str[2 * PICO_UNIQUE_BOARD_ID_SIZE_BYTES + 1];
 static const char *string_desc_arr[] = {
     (const char[]){ 0x09, 0x04 },     // 0: English (US)
     "Adafruit",                       // 1: manufacturer
-    "Fruit Jam ColecoVision",         // 2: product
+    "Adafruit ColecoJam",         // 2: product
     serial_str,                       // 3: serial
     "Coleco ROM Storage",             // 4: MSC interface
 };

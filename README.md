@@ -1,4 +1,4 @@
-# fruitjam-coleco
+# Adafruit_ColecoJam
 
 A ColecoVision emulator for the **Adafruit Fruit Jam** (RP2350B), written in
 C++ against the Pico SDK and formatted for Visual Studio Code.
@@ -24,6 +24,10 @@ below before fitting it.
 you can always tell whether the board is running the code you just changed. It
 also holds switches to compile out video, audio, the USB host and the USB drive
 individually, which is how most of the bring-up problems were isolated.
+
+> Formerly `fruitjam-coleco`. The CMake target is `colecojam` and the build
+> produces `build/Adafruit_ColecoJam.uf2`. If you are updating an existing
+> checkout, delete `build/` after renaming -- the cached target name changes.
 
 ## Read this first: the .uf2
 
@@ -52,13 +56,13 @@ Building the UF2 takes about two minutes:
 git clone -b 2.1.1 https://github.com/raspberrypi/pico-sdk
 cd pico-sdk && git submodule update --init && export PICO_SDK_PATH=$PWD && cd ..
 
-cd fruitjam-coleco
+cd Adafruit_ColecoJam
 ./tools/fetch_deps.sh      # FatFs + Pico-PIO-USB
-./tools/build.sh           # -> build/fruitjam-coleco.uf2
+./tools/build.sh           # -> build/Adafruit_ColecoJam.uf2
 ```
 
 Then hold **Button 1** while pressing **Reset** (or tapping the reset button) to
-mount `RP2350` as a USB drive, and drop `fruitjam-coleco.uf2` onto it.
+mount `RP2350` as a USB drive, and drop `Adafruit_ColecoJam.uf2` onto it.
 
 In VS Code: install the recommended extensions, then **Ctrl+Shift+B** runs the
 `Build UF2` task. `Flash via picotool` builds and flashes in one step.
@@ -118,7 +122,7 @@ In the menu, D-pad browses (left/right page), **A** or **Start** loads. Board
 
 ## Cartridge reader shield
 
-If the [Fruit Jam ColecoVision Cartridge
+If the [Adafruit ColecoJam Cartridge
 Reader](https://github.com/cogliano/Fruit_Jam_ColecoVision_Cartridge_Reader)
 shield is fitted with a cartridge seated, the emulator detects it at boot, dumps
 it to RAM and runs it — the SD browser is skipped entirely. Pull the cartridge
