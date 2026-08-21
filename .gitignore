@@ -1,0 +1,10 @@
+build/
+third_party/fatfs/
+third_party/Pico-PIO-USB/
+*.uf2
+*.elf
+*.bin
+*.hex
+*.dis
+.cache/
+compile_commands.json

@@ -1,0 +1,67 @@
+; audio_i2s.pio -- 16-bit stereo I2S master (BCLK + LRCLK + DATA)
+;
+; This is the canonical pico-extras audio_i2s program rather than a hand-rolled
+; one. The previous version used `pull noblock` and an explicit bit counter; it
+; produced a state machine that stopped consuming its FIFO, which jammed the
+; DMA and killed audio a couple of seconds in.
+;
+; Key difference: autopull. The state machine pulls a new 32-bit word (one
+; stereo frame, left in the high half) automatically every 32 bits shifted, so
+; it can never fall out of step with the DMA. If the FIFO does run dry the SM
+; stalls and resumes cleanly when data arrives, instead of quietly desyncing.
+;
+; Side-set bit 0 = BCLK, bit 1 = LRCLK/WS. One bit is shifted per two SM
+; cycles, so the SM clock is 2 x 32 x sample_rate.
+;
+; SPDX-License-Identifier: GPL-3.0-or-later
+
+.program audio_i2s
+.side_set 2
+
+                        ; side-set: bit1 = LRCLK, bit0 = BCLK
+bitloop1:
+    out pins, 1           side 2
+    jmp x-- bitloop1      side 3
+    out pins, 1           side 0
+    set x, 14             side 1
+
+bitloop0:
+    out pins, 1           side 0
+    jmp x-- bitloop0      side 1
+    out pins, 1           side 2
+public entry_point:
+    set x, 14             side 3
+
+% c-sdk {
+#include "hardware/clocks.h"
+
+static inline void audio_i2s_program_init(PIO pio, uint sm, uint offset,
+                                          uint data_pin, uint clock_pin_base) {
+    pio_sm_config sm_config = audio_i2s_program_get_default_config(offset);
+
+    sm_config_set_out_pins(&sm_config, data_pin, 1);
+    sm_config_set_sideset_pins(&sm_config, clock_pin_base);
+
+    // Shift left (MSB first), autopull at 32 bits. Autopull is what keeps the
+    // state machine and the DMA in lockstep.
+    sm_config_set_out_shift(&sm_config, false, true, 32);
+    sm_config_set_fifo_join(&sm_config, PIO_FIFO_JOIN_TX);
+
+    pio_sm_init(pio, sm, offset, &sm_config);
+
+    // Drive DATA, BCLK and LRCLK. Set the directions before handing the pads
+    // to the PIO so nothing glitches on the codec's clock inputs.
+    const uint pin_mask = (1u << data_pin) | (3u << clock_pin_base);
+    pio_sm_set_pindirs_with_mask(pio, sm, pin_mask, pin_mask);
+    pio_sm_set_pins(pio, sm, 0);
+
+    pio_gpio_init(pio, data_pin);
+    pio_gpio_init(pio, clock_pin_base);
+    pio_gpio_init(pio, clock_pin_base + 1);
+
+    // Start at entry_point, not at offset 0: the loop is entered part-way
+    // through so the first frame is aligned.
+    pio_sm_exec(pio, sm,
+                pio_encode_jmp(offset + audio_i2s_offset_entry_point));
+}
+%}
