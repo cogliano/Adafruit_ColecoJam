@@ -49,3 +49,31 @@ The Fruit Jam ships with the A2 die, which cannot reliably read a
 high-impedance input pulled low by a weak resistor. Where the cartridge reader
 needs a defined idle level it uses pull-*ups* and reads the cartridge's active
 drive. If you add pull-downs anywhere, use 8.2k or smaller.
+
+## RP2350B has two GPIO banks
+
+The Fruit Jam carries the RP2350**B**, with 48 GPIO. Anything above GPIO 31 --
+which includes A1-A5 (41-45) and A0 (40) on the header -- lives in the upper
+bank and is invisible to the 32-bit helpers:
+
+| Wrong for pins > 31 | Correct |
+|---|---|
+| `gpio_get_all()`  | `gpio_get_all64()` |
+| `gpio_put_all()`  | `gpio_put_all64()` |
+| `gpio_set_mask()` | `gpio_set_mask64()` |
+
+This fails silently rather than loudly: the high pins simply read as zero. It
+cost a debugging round on the cartridge reader, where four of the eight data
+lines sit on GPIO 41, 42, 44 and 45 and were permanently reading 0 while the
+other four worked perfectly.
+
+### Erratum E9 and the cartridge slot
+
+With no cartridge fitted, the reader's data bus floats and reads a constant
+value rather than 0x00 -- 0xC0 on the board this was developed against. That is
+erratum E9 again: the internal pull-down cannot hold a floating input low.
+
+`cart_read()` therefore decides whether a bank is populated by looking for
+*variation* across the bank rather than for a specific value. A floating bus
+reads the same byte at every address; real ROM contents do not. Testing for
+0x00 would report every cartridge as a full 32 KB.

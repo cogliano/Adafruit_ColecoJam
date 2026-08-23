@@ -162,6 +162,61 @@
 // Set to 0 to compile the shield support out entirely.
 #define ENABLE_CART_READER  1
 
+// --- Cartridge reader shield -----------------------------------------------
+// Pin assignments taken from the reference CircuitPython implementation:
+// https://github.com/cogliano/Fruit_Jam_ColecoVision_Cartridge_Reader
+//
+// The shield borrows pins the rest of the board also uses. GPIO 20/21 are the
+// audio codec's I2C bus and GPIO 8/9 are the debug UART, so cart_present()
+// hands them back when no cartridge is found. Configure the codec BEFORE
+// touching the cartridge, which is the order main() already uses.
+// LATCH PIN VARIANT. The reference project contradicts itself here, and the
+// two sources cannot both be right:
+//
+//   0 = latch on GPIO 43 (board A3), data bit 6 on GPIO 8   [code.py]
+//   1 = latch on GPIO 8,             data bit 6 on GPIO 43  [README table]
+//
+// code.py drives A3 as the latch and lists D8 among the data pins; the
+// README's wiring table runs GPIO 8 to 74HC595 pin 12, which is RCLK. The
+// comments in code.py mention "version 1" and "version 2" boards, so these are
+// probably different shield revisions.
+//
+// Symptom of getting it wrong: the address never reaches the cartridge, so
+// every offset returns the same byte.
+//
+// Both variants showed that symptom while the shift registers were being
+// clocked on the wrong SPI bus, so neither was actually ruled out. Back to 0
+// (code.py's reading) now that SPI1 is used; try 1 if the address is still
+// dead.
+#define CART_LATCH_VARIANT  0
+
+// Address lines and CS 0xE000 are clocked out over SPI1 on GPIO 30 (SCK) and
+// GPIO 31 (MOSI).
+//
+// NOT the SD card's SPI0. GPIO 34/35 serve the microSD socket directly and are
+// not brought out on the 2x16 header, so a shield cannot reach them -- driving
+// them talked to nothing, which is why chip selects worked while the address
+// bus stayed dead. GPIO 28/30/31 are SPI1's MISO/SCK/MOSI and ARE on the
+// header; they double as the ESP32-C6 link, which the shield takes over.
+#define CART_SPI_PORT       spi1
+#define PIN_CART_SCK        30
+#define PIN_CART_MOSI       31
+#define CART_SPI_BAUD       4000000
+
+// Data bus D0..D7. Read only; never driven as outputs. Bit 6 swaps with the
+// latch pin between variants -- see CART_LATCH_VARIANT above.
+#if CART_LATCH_VARIANT
+  #define PIN_CART_LATCH    8
+  #define CART_DATA_PINS    { 7, 45, 41, 42, 44, 6, 43, 9 }
+#else
+  #define PIN_CART_LATCH    43
+  #define CART_DATA_PINS    { 7, 45, 41, 42, 44, 6, 8, 9 }
+#endif
+
+// Chip selects for 0x8000 / 0xA000 / 0xC000, active low. 0xE000 lives on bit
+// 15 of the shift register chain instead -- see cart_reader.cpp.
+#define CART_CS_PINS        { 10, 20, 21 }
+
 // Set to 0 to skip video_init() entirely. Everything still runs -- USB, SD,
 // the emulator -- there is just no DVI output and the menu draws into a
 // framebuffer nobody scans out. Use this to prove whether a USB or SD problem
@@ -268,6 +323,29 @@
 
 #define AUDIO_TEST_TONE     0
 
+// Show a cartridge probe on the menu's status line in place of the controller
+// count. Eight bytes:
+//
+//   first four   bank 0 at 0x0000, 0x0001, 0x1555, 0x1AAA
+//   next three   banks 1, 2, 3 at offset 0
+//   last         bank 0 at 0x0000 again
+//
+// Reading it:
+//   first four all identical  the address is not reaching the cartridge --
+//                             the shift registers are not latching, so try
+//                             the other CART_LATCH_VARIANT
+//   first four vary           address bus works; if there is still no AA 55
+//                             or 55 AA the data bit order is wrong
+//   everything 00             nothing driving the bus at all
+//   a constant value, no cart  normal. With the slot empty the data bus
+//                             floats, and RP2350 A2 erratum E9 lets a
+//                             floating input latch high despite the internal
+//                             pull-down -- 0xC0 is what an empty slot reads
+//                             on at least one board. Harmless: it is not a
+//                             valid header, so nothing is falsely detected.
+//   last byte != first        readings unstable, suspect timing
+#define SHOW_CART_DEBUG     0
+
 #define SHOW_HID_DEBUG      0
 
 // Build identifier, shown on the cartridge menu's title bar.
@@ -277,7 +355,7 @@
 // perfectly matched an older decoder, and it took a full round of analysis to
 // realise the source and the firmware had diverged. Bump this whenever you
 // change something you intend to test.
-#define ACJ_BUILD_ID        "build 29"
+#define ACJ_BUILD_ID        "build 37"
 
 
 // ---------------------------------------------------------------------------

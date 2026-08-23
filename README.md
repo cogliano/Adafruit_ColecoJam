@@ -185,15 +185,27 @@ than tearing.
 Places where I had to make a judgement call, roughly in order of how likely they
 are to need adjusting:
 
-1. **Cartridge reader pin map** (`src/hw/cart_reader.cpp`). GitHub blocked
-   automated access to the reader repo, so I could not read its pin table. The
-   assignments there follow the standard 74HC595 shift-register topology that
-   the reader descends from (15 address lines through two chained registers,
-   8 data lines and 4 chip selects on direct GPIO) mapped onto the Fruit Jam's
-   broken-out header in the obvious order. **Confirm these against the
-   CircuitPython source before connecting a cartridge** — driving a data pin as
-   an output into the cartridge's output could damage either board. Every pin is
-   a single `#define`.
+1. ~~**Cartridge reader pin map**~~ — resolved from the reference project,
+   [cogliano/Fruit_Jam_ColecoVision_Cartridge_Reader](https://github.com/cogliano/Fruit_Jam_ColecoVision_Cartridge_Reader),
+   which needs the ColecoVision Game Cartridge Adapter Shield from DanTheGeek.
+
+   The address bus and CS 0xE000 are clocked out over **SPI0** — the same bus
+   as the microSD card — into two chained 74HC595s, latched by GPIO 43. A
+   16-bit word sent MSB first carries CS 0xE000 in bit 15 and A14..A0 in bits
+   14..0. Three chip selects sit on GPIO 10, 20 and 21; the data bus is on
+   GPIO 7, 45, 41, 42, 44, 6, 8 and 9 (D0..D7), read-only with pull-downs.
+
+   Two things follow from the wiring and are handled in `cart_reader.cpp`:
+
+   - Reading bank 3 takes **two latches**, address first with CS 0xE000 still
+     high, because that chip select shares the shift register with the address
+     and a single latch would make both valid at the same instant.
+   - The shield borrows the **audio codec's I2C bus** (GPIO 20/21) and the
+     **debug UART** (GPIO 8/9). `cart_present()` gives them back when no
+     cartridge is found, and the codec is configured before any of this runs.
+
+   There is no cartridge-detect line, so presence is decided by the `AA 55` /
+   `55 AA` header signature.
 
 2. **HSTX register setup** (`src/hw/video_hstx.cpp`). The TMDS encoder and
    serialiser configuration follows the pico-examples `dvi_out_hstx_encoder`

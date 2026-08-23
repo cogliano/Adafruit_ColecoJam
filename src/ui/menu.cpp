@@ -14,6 +14,7 @@
 #include "../hw/usb_host.h"
 #include "../hw/usb_msc.h"
 #include "../hw/audio.h"
+#include "../hw/cart_reader.h"
 
 #include "pico/stdlib.h"
 #include <string.h>
@@ -436,8 +437,28 @@ bool menu_select_rom(char *out_path, size_t out_len) {
             int pads = usb_host_pad_count();
             int hid  = usb_host_hid_seen();
             int dev  = usb_host_dev_seen();
+            // All three are unused when SHOW_CART_DEBUG replaces this line.
+            (void)pads; (void)hid; (void)dev;
             static char st[64];
+#if SHOW_CART_DEBUG
+            // Cartridge probe first, and regardless of controllers: the two
+            // bytes seen through each of the four chip selects.
+            {
+                uint8_t cb[8];
+                int n = cart_probe_bytes(cb, sizeof(cb));
+                if (n > 0) {
+                    int o = snprintf(st, sizeof(st), "cs");
+                    for (int i = 0; i < n && o < (int)sizeof(st) - 4; i++)
+                        o += snprintf(st + o, sizeof(st) - o, " %02X", cb[i]);
+                    status_col = cart_header_bank() >= 0 ? COL_ACCENT : COL_ERROR;
+                } else {
+                    snprintf(st, sizeof(st), "cart: not probed");
+                    status_col = COL_ERROR;
+                }
+            }
+#else
             if (pads > 0) {
+
 #if SHOW_HID_DEBUG
                 // Audio plumbing state, kept behind the debug switch:
                 //   fl  DAC flag register; 99 = DACs and HP drivers running
@@ -469,6 +490,7 @@ bool menu_select_rom(char *out_path, size_t out_len) {
                          dev, dev == 1 ? "" : "s", hid);
                 status_col = COL_ERROR;
             }
+#endif
             status = st;
 
             draw_frame(selected, scroll, status, status_col);
