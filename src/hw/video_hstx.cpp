@@ -15,6 +15,10 @@
 #include "video_hstx.h"
 #include "config.h"
 
+// Built only when this is the selected driver; video_hdmi.cpp provides the
+// same interface on top of pico_hdmi otherwise.
+#if VIDEO_DRIVER == VIDEO_DRIVER_HSTX
+
 #include "pico/stdlib.h"
 #include "hardware/dma.h"
 #include "hardware/irq.h"
@@ -213,7 +217,7 @@ static void __scratch_x("hstx") dma_irq_handler(void) {
     }
 }
 
-uint32_t video_frame_count(void) { return frame_counter; }
+uint32_t video_frames_rendered(void) { return frame_counter; }
 
 // Set once video_init() has actually brought the DMA chain up. With
 // ENABLE_VIDEO 0 this stays false and vsync waits become a plain delay, so the
@@ -379,3 +383,5 @@ void video_set_pixel(int x, int y, uint16_t colour) {
     if ((unsigned)x < FB_WIDTH && (unsigned)y < FB_HEIGHT)
         framebuffer[y * FB_WIDTH + x] = colour;
 }
+
+#endif  // VIDEO_DRIVER == VIDEO_DRIVER_HSTX

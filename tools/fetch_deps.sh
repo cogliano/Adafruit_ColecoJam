@@ -34,6 +34,16 @@ else
     echo "Pico-PIO-USB already present."
 fi
 
+# --- pico_hdmi -------------------------------------------------------------
+# Needed only for VIDEO_DRIVER_PICO_HDMI, which is what carries audio over HDMI.
+if [ ! -f "$TP/pico_hdmi/CMakeLists.txt" ]; then
+    echo "Fetching pico_hdmi..."
+    git clone --depth 1 https://github.com/fliperama86/pico_hdmi.git \
+        "$TP/pico_hdmi"
+else
+    echo "pico_hdmi already present."
+fi
+
 echo
 echo "Done. Now:"
 echo "  export PICO_SDK_PATH=/path/to/pico-sdk"

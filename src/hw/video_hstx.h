@@ -5,7 +5,11 @@
 
 void      video_init(void);
 uint16_t *video_framebuffer(void);      // 320x240 RGB565
-uint32_t  video_frame_count(void);
+// Frames scanned out since init. Named to avoid pico_hdmi's own
+// `extern volatile uint32_t video_frame_count`, which that library exports as
+// a variable -- a function of the same name is a hard compile error when both
+// headers are visible.
+uint32_t  video_frames_rendered(void);
 void      video_wait_vsync(void);
 
 void video_clear(uint16_t colour);

@@ -163,16 +163,14 @@ static uint8_t read_data_bus(void) {
 // The address presented is (bank << 13) | off, matching the reference: A13 and
 // A14 are driven as well as the chip select, which matters for cartridges
 // built from one large ROM rather than several 8 KB parts.
-static uint8_t cart_read_byte(int bank, uint16_t off) {
+static uint8_t cart_read_once(int bank, uint16_t off) {
     const uint16_t addr = (uint16_t)(((bank & 3) << 13) | (off & 0x1FFF));
     uint8_t v;
 
     if (bank < 3) {
         set_address(addr);
         gpio_put(cs_pins[bank], 0);
-        // 74HC595 propagation plus the ROM's access time, 200-450 ns on parts
-        // of this era. Two microseconds is generous and still quick enough.
-        sleep_us(2);
+        sleep_us(CART_ACCESS_US);       // 595 propagation + ROM access time
         v = read_data_bus();
         gpio_put(cs_pins[bank], 1);
     } else {
@@ -182,11 +180,33 @@ static uint8_t cart_read_byte(int bank, uint16_t off) {
         shift_out16((uint16_t)(addr | (1u << SR_BIT_CS3)));
         sleep_us(1);
         shift_out16(addr);              // CS3 low
-        sleep_us(2);
+        sleep_us(CART_ACCESS_US);
         v = read_data_bus();
         shift_out16((uint16_t)(addr | (1u << SR_BIT_CS3)));
     }
     return v;
+}
+
+// Read one byte from bank 0-3 at `off` within that 8 KB bank.
+//
+// With CART_VERIFY_READS the byte is read twice and the two must agree. A
+// marginal access does not produce random garbage -- it produces a value that
+// decays towards zero as bits fail to settle -- so two reads that match is a
+// good signal that the bus had time to stabilise. Retrying with the same
+// timing works because the ROM is already selected and warm by the second
+// attempt.
+static uint8_t cart_read_byte(int bank, uint16_t off) {
+#if CART_VERIFY_READS
+    uint8_t a = cart_read_once(bank, off);
+    for (int attempt = 0; attempt < 3; attempt++) {
+        const uint8_t b = cart_read_once(bank, off);
+        if (a == b) return a;
+        a = b;
+    }
+    return a;
+#else
+    return cart_read_once(bank, off);
+#endif
 }
 
 // ---------------------------------------------------------------------------

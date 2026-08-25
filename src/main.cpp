@@ -35,6 +35,7 @@
 #include "hw/usb_host.h"
 #include "hw/usb_msc.h"
 #include "hw/cart_reader.h"
+#include "hw/hdmi_audio.h"
 #include "ui/menu.h"
 
 extern "C" {
@@ -55,7 +56,8 @@ static FATFS fs;
 // ---------------------------------------------------------------------------
 // Core 1: audio
 // ---------------------------------------------------------------------------
-#if ENABLE_AUDIO
+#if ENABLE_AUDIO && AUDIO_SINK == AUDIO_SINK_CODEC && \
+    VIDEO_DRIVER != VIDEO_DRIVER_PICO_HDMI
 static int16_t mix_buf[AUDIO_BUF_SAMPLES];
 static volatile bool audio_running = false;
 #endif
@@ -70,13 +72,19 @@ static volatile bool host_ready    = false;
 // tuh_init() here registers its handler on core 1, out of video's way.
 //
 // tuh_init() must be called on the same core that will call tuh_task().
+#if VIDEO_DRIVER != VIDEO_DRIVER_PICO_HDMI
+// With VIDEO_DRIVER_PICO_HDMI this function is never launched: the library's
+// own loop takes core 1 and never returns, so USB host and audio run on core 0
+// instead. That is safe there precisely because core 0 no longer carries a
+// video interrupt for PIO-USB to contend with -- the reason the host was moved
+// off core 0 in the first place no longer applies.
 static void core1_main(void) {
 #if USB_HOST_ON_CORE1
     usb_host_init();
 #endif
     host_ready = true;
 
-#if ENABLE_AUDIO
+#if ENABLE_AUDIO && AUDIO_SINK == AUDIO_SINK_CODEC
     audio_init();
     audio_set_volume(80);
     audio_running = true;
@@ -123,6 +131,7 @@ static void core1_main(void) {
 #endif
     }
 }
+#endif  // VIDEO_DRIVER != VIDEO_DRIVER_PICO_HDMI
 
 // Retune the clock tree so PIO-USB, DVI and the native USB device can all have
 // the frequency each requires. See the comment block in config.h.
@@ -131,7 +140,11 @@ static void core1_main(void) {
 // moved onto pll_sys BEFORE pll_usb is retuned, or the USB device clock
 // collapses mid-reconfiguration.
 static void setup_clocks(void) {
-#if USB_CLOCK_TEST_MODE
+#if VIDEO_DRIVER == VIDEO_DRIVER_PICO_HDMI
+    // Nothing to do. pico_hdmi derives clk_hstx from clk_sys itself, and
+    // clk_usb stays on pll_usb at its stock 48 MHz.
+    return;
+#elif USB_CLOCK_TEST_MODE
     // Stock clock tree: clk_usb stays on pll_usb at 48 MHz, pll_usb is not
     // retuned, and clk_hstx is never configured. Nothing to do.
     return;
@@ -166,11 +179,23 @@ static void setup_clocks(void) {
 extern "C" void isr_hardfault(void) {
     gpio_init(PIN_LED);
     gpio_set_dir(PIN_LED, GPIO_OUT);
+
+    // THREE slow blinks, then a long pause, forever.
+    //
+    // The previous version used a tight nop loop that ran at 40-100 Hz -- far
+    // too fast to see, so a hard fault looked exactly like the LED being stuck
+    // on. That is a bad failure signature for the one condition that most
+    // needs to be obvious. These counts give roughly a quarter-second per
+    // half-blink at 252 MHz; the exact rate does not matter, only that it is
+    // slow enough to count.
     for (;;) {
-        gpio_put(PIN_LED, 0);
-        for (volatile int i = 0; i < 400000; i++) __asm volatile("nop");
-        gpio_put(PIN_LED, 1);
-        for (volatile int i = 0; i < 400000; i++) __asm volatile("nop");
+        for (int b = 0; b < 3; b++) {
+            gpio_put(PIN_LED, 0);
+            for (volatile uint32_t i = 0; i < 12000000u; i++) __asm volatile("nop");
+            gpio_put(PIN_LED, 1);
+            for (volatile uint32_t i = 0; i < 12000000u; i++) __asm volatile("nop");
+        }
+        for (volatile uint32_t i = 0; i < 60000000u; i++) __asm volatile("nop");
     }
 }
 
@@ -243,11 +268,19 @@ static void wait_for_button_release(void) {
 // After that, a repeating group of 1-6 blinks with a long pause is a fatal
 // error code -- see fatal() below, not the same as boot progress.
 static void blink(int n) {
+#if !BOOT_DIAGNOSTICS
+    // Progress blinks compiled out. The build ID on the menu's title bar
+    // already confirms which firmware is running, and fatal codes below are
+    // unaffected.
+    (void)n;
+    return;
+#else
     for (int i = 0; i < n; i++) {
         gpio_put(PIN_LED, 0); sleep_ms(150);
         gpio_put(PIN_LED, 1); sleep_ms(150);
     }
     sleep_ms(600);
+#endif
 }
 static uint32_t load_file(const char *path, uint8_t *dst, uint32_t max_len) {
     FIL f;
@@ -327,11 +360,48 @@ static uint32_t load_file(const char *path, uint8_t *dst, uint32_t max_len) {
 
         // Poll USB and refresh controller state once per frame -- the
         // ColecoVision's own scan rate is slower than this anyway.
-#if !USB_HOST_ON_CORE1
+#if !USB_HOST_ON_CORE1 || VIDEO_DRIVER == VIDEO_DRIVER_PICO_HDMI
+        // With pico_hdmi the library owns core 1, so the host stack is
+        // serviced here regardless of USB_HOST_ON_CORE1.
         usb_host_task();
 #endif
         usb_msc_task();
         usb_host_update_coleco();
+
+#if AUDIO_SINK == AUDIO_SINK_HDMI
+        // Top up the HDMI audio queue until it reaches its target, rather than
+        // rendering a single fixed block per frame.
+        //
+        // One 512-sample block per frame supplies only about 70% of what the
+        // stream consumes (44100 / 59.92 = 736 samples per frame), so the
+        // queue ran dry every frame and the library filled the gap with
+        // silence packets. That is what the static was.
+        //
+        // The guard caps the work per frame so a stall here can never starve
+        // the emulator; the queue is deep enough to ride out an occasional
+        // short fill.
+        {
+            static int16_t pend_buf[AUDIO_BUF_SAMPLES];
+            static int     pend_len = 0;
+
+            for (int guard = 0; guard < 8; guard++) {
+                if (hdmi_audio_queue_level() >= HDMI_AUDIO_QUEUE_TARGET) break;
+
+                if (pend_len == 0) {
+                    psg_render(pend_buf, AUDIO_BUF_SAMPLES);
+                    pend_len = AUDIO_BUF_SAMPLES;
+                }
+
+                const int used = hdmi_audio_submit(pend_buf, pend_len);
+                if (used <= 0) break;               // queue full or wedged
+
+                if (used < pend_len)
+                    memmove(pend_buf, pend_buf + used,
+                            (size_t)(pend_len - used) * sizeof(int16_t));
+                pend_len -= used;
+            }
+        }
+#endif
 
         // Button 1 returns to the bootloader so new firmware can be flashed
         // without reaching for the BOOTSEL/reset dance. It must be HELD for a
@@ -385,14 +455,13 @@ int main(void) {
     gpio_set_dir(PIN_LED, GPIO_OUT);
     gpio_put(PIN_LED, 1);
 
-    // One long 1-second pulse before anything else. This exists purely so you
-    // can confirm at a glance that a new build actually got flashed -- an
-    // unchanged symptom means something quite different if the old binary is
-    // still running.
+#if BOOT_DIAGNOSTICS
+    // One long pulse, so a stale flash is obvious before anything else runs.
     gpio_put(PIN_LED, 0);
     sleep_ms(1000);
     gpio_put(PIN_LED, 1);
     sleep_ms(600);
+#endif
 
     blink(1);                       // reached main, clocks up
 
@@ -427,11 +496,18 @@ int main(void) {
     blink(3);                       // video up (or skipped)
     menu_message("ADAFRUIT COLECOJAM", "Starting up...", nullptr, false);
 
+#if VIDEO_DRIVER == VIDEO_DRIVER_PICO_HDMI
+    // video_init() has already taken core 1 for the HDMI output loop, so the
+    // USB host comes up here on core 0.
+    usb_host_init();
+    host_ready = true;
+#else
     // Core 1 brings up the USB host and audio. Wait for the host stack so a
     // hang there still shows as a missing blink rather than surfacing later.
     multicore_launch_core1(core1_main);
     for (int i = 0; i < 300 && !host_ready; i++) sleep_ms(10);
-    blink(4);                       // core1 up: USB host + audio running
+#endif
+    blink(4);                       // USB host + audio running
 
     // --- SD card ---------------------------------------------------------
     if (!sd_init()) {

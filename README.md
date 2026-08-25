@@ -10,6 +10,53 @@ SNES-layout USB gamepads.
 
 ---
 
+## Audio over HDMI
+
+Sound can travel over the HDMI cable instead of the headphone jack. Two
+settings in `include/config.h` control it:
+
+```c
+#define AUDIO_SINK    AUDIO_SINK_HDMI      // or AUDIO_SINK_CODEC
+#define VIDEO_DRIVER  VIDEO_DRIVER_PICO_HDMI   // or VIDEO_DRIVER_HSTX
+```
+
+HDMI is the default. Selecting `AUDIO_SINK_HDMI` with the built-in HSTX driver
+raises a `#error`, because that driver emits no data islands and the result
+would be silent.
+
+This is built on [pico_hdmi](https://github.com/fliperama86/pico_hdmi), the
+same library the sister emulator projects use for picture and sound over HDMI.
+Carrying audio needs TERC4 symbol encoding, data island periods with guard
+bands, BCH error correction per packet, AVI and Audio InfoFrames, and N/CTS
+clock regeneration — all of which that library already implements and has
+tested on this class of board. Run `tools/fetch_deps.sh` to pull it into
+`third_party/pico_hdmi`.
+
+Three things change when it is selected:
+
+- **Core 1 belongs to the library.** `video_output_core1_run()` never returns,
+  so the USB host and the emulator both run on core 0. That is safe here
+  precisely because core 0 no longer carries a video interrupt for PIO-USB to
+  contend with — the reason the host was moved off core 0 originally.
+- **clk_sys becomes 252 MHz.** The library derives `clk_hstx` as
+  `clk_sys / PICO_HDMI_HSTX_CLK_DIV`, and 640x480p60 needs 126 MHz, so the
+  divider is 2. 252 is also 21 x 12 MHz, which is what Pico-PIO-USB requires,
+  so both share one PLL and the `pll_usb` retune the built-in driver needs is
+  dropped.
+- **The codec is not initialised**, freeing its I2C bus and skipping the 350 ms
+  de-pop wait.
+- **The image runs from RAM** (`copy_to_ram`). Both cores fetch instructions
+  through one XIP cache, and the library's core-1 scanline loop has about a 6 us
+  deadline per line. Heavy flash-resident work on core 0 -- `sd_init()` and
+  FatFs are the first of it during boot -- stalls core 1 on cache misses and
+  desyncs the HSTX command stream, killing the picture while everything else
+  still reports success. About 90 KB of text joins ~298 KB of statics, well
+  inside the 520 KB available.
+
+Switching back to `AUDIO_SINK_CODEC` with `VIDEO_DRIVER_HSTX` restores the
+previous arrangement exactly: 240 MHz, `clk_hstx` from a retuned `pll_usb`, and
+USB host on core 1.
+
 ## Status
 
 Built and confirmed working on real hardware: 640x480p60 DVI over HSTX, SD card
@@ -206,6 +253,12 @@ are to need adjusting:
 
    There is no cartridge-detect line, so presence is decided by the `AA 55` /
    `55 AA` header signature.
+
+   The cartridge is read **once**, at boot, into a 32 KB RAM buffer, and the
+   shield's pins are released immediately afterwards. The emulator's bus reads
+   come from that buffer, never from the hardware — so the shield adds no
+   per-instruction cost, and a cartridge can be removed mid-game without
+   affecting anything. Changing cartridges needs a reset.
 
 2. **HSTX register setup** (`src/hw/video_hstx.cpp`). The TMDS encoder and
    serialiser configuration follows the pico-examples `dvi_out_hstx_encoder`

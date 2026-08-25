@@ -59,6 +59,7 @@ add_executable(colecojam
     src/emu/coleco.cpp
 
     src/hw/video_hstx.cpp
+    src/hw/video_hdmi.cpp
     src/hw/audio.cpp
     src/hw/sdcard.cpp
     src/hw/usb_host.cpp
@@ -136,6 +137,40 @@ endif()
 # as -lhardware_hstx, which fails. Link it only if a future SDK adds the target.
 if(TARGET hardware_hstx)
     target_link_libraries(colecojam hardware_hstx)
+endif()
+
+# --- pico_hdmi -------------------------------------------------------------
+# Optional: only needed for VIDEO_DRIVER_PICO_HDMI, which is what carries sound
+# over HDMI. Fetch with tools/fetch_deps.sh, or unpack the repository into
+# third_party/pico_hdmi.
+# Mirrors VIDEO_DRIVER in include/config.h. CMake cannot read that header, so
+# the two must be kept in step by hand: ON here means VIDEO_DRIVER_PICO_HDMI
+# there. A mismatch is caught at compile time by the static_assert in
+# video_hdmi.cpp, which only builds under the library driver.
+option(VIDEO_DRIVER_IS_PICO_HDMI
+       "Build for VIDEO_DRIVER_PICO_HDMI (HDMI audio, run from RAM)" ON)
+
+set(PICO_HDMI_DIR ${CMAKE_CURRENT_LIST_DIR}/third_party/pico_hdmi)
+if(EXISTS ${PICO_HDMI_DIR}/CMakeLists.txt)
+    # MUST be set before add_subdirectory, and it MUST be set here rather than
+    # in config.h -- the library never includes our headers. It reads this as a
+    # CMake cache variable and turns it into MODE_HSTX_CLK_DIV.
+    #
+    # The library computes clk_hstx = clk_sys / MODE_HSTX_CLK_DIV. We run
+    # clk_sys at 252 MHz because Pico-PIO-USB needs a multiple of 12 MHz, and
+    # 640x480p60 needs clk_hstx = 126 MHz, so the divider is 2. Left at its
+    # default of 1 the library drives HSTX at 252 MHz -- double spec, no
+    # picture, and video_output_init() does not come back.
+    set(PICO_HDMI_HSTX_CLK_DIV 2 CACHE STRING "HSTX clock divider" FORCE)
+
+    add_subdirectory(${PICO_HDMI_DIR} pico_hdmi)
+    target_link_libraries(colecojam pico_hdmi)
+    target_include_directories(colecojam PRIVATE ${PICO_HDMI_DIR}/include)
+    message(STATUS "colecojam: pico_hdmi found -- HDMI audio available")
+else()
+    message(STATUS
+        "colecojam: pico_hdmi not present. VIDEO_DRIVER_PICO_HDMI (and with it "
+        "audio over HDMI) will not build. Run tools/fetch_deps.sh.")
 endif()
 
 # --- Pico-PIO-USB ----------------------------------------------------------
@@ -224,6 +259,22 @@ if(TARGET tinyusb_host)
     else()
         target_include_directories(tinyusb_host PUBLIC ${PIO_USB_DIR}/src)
     endif()
+endif()
+
+# --- Run from RAM when pico_hdmi drives the display ------------------------
+# Both cores fetch instructions through the same XIP cache. pico_hdmi's core-1
+# scanline loop has roughly a 6 us deadline per line, and when core 0 does
+# heavy flash-resident work -- sd_init() and FatFs are the first such work in
+# the boot sequence -- core 1 stalls on cache misses, misses the deadline, and
+# the HSTX command stream desyncs. The picture dies while every other
+# subsystem carries on reporting success.
+#
+# Copying the image to SRAM removes XIP from the picture entirely. It costs
+# flash-to-RAM startup time and the text has to fit alongside the statics:
+# ~90 KB text + ~298 KB bss = ~387 KB of the 520 KB available.
+if(VIDEO_DRIVER_IS_PICO_HDMI)
+    pico_set_binary_type(colecojam copy_to_ram)
+    message(STATUS "colecojam: copy_to_ram enabled for pico_hdmi timing")
 endif()
 
 # --- Output ----------------------------------------------------------------

@@ -339,6 +339,30 @@ bool menu_select_rom(char *out_path, size_t out_len) {
         }
 #endif
 
+        // Repaint when the USB picture changes, so a controller plugged in --
+        // or enumerating a moment after the menu is first drawn -- is reported
+        // immediately rather than at the next cursor movement.
+        //
+        // Event-driven rather than on a timer: the counts only move when a
+        // device actually arrives or leaves, so this costs one comparison per
+        // pass and repaints exactly when there is something new to say.
+        {
+            static int  last_pads = -1, last_dev = -1, last_hid = -1;
+            static int  last_step = -1;
+            const int   now_pads = usb_host_pad_count();
+            const int   now_dev  = usb_host_dev_seen();
+            const int   now_hid  = usb_host_hid_seen();
+            const int   now_step = usb_host_init_step();
+            if (now_pads != last_pads || now_dev != last_dev ||
+                now_hid  != last_hid  || now_step != last_step) {
+                last_pads = now_pads;
+                last_dev  = now_dev;
+                last_hid  = now_hid;
+                last_step = now_step;
+                need_redraw = true;
+            }
+        }
+
         if (time_reached(next_beat)) {
             beat = !beat;
             gpio_put(PIN_LED, beat ? 0 : 1);

@@ -20,6 +20,25 @@
 //
 // Defined first because the clock settings below depend on it.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Which video driver to build.
+//
+//   VIDEO_DRIVER_HSTX      the built-in DVI driver in video_hstx.cpp. Video
+//                          only; sound must go to the codec.
+//   VIDEO_DRIVER_PICO_HDMI the pico_hdmi library, which adds HDMI data islands
+//                          and therefore sound over the same cable.
+//
+// pico_hdmi owns core 1 and derives clk_hstx as clk_sys / PICO_HDMI_HSTX_CLK_DIV,
+// so clk_sys must be 126 MHz times that divider -- see the clock block above.
+// ---------------------------------------------------------------------------
+#define VIDEO_DRIVER_HSTX       0
+#define VIDEO_DRIVER_PICO_HDMI  1
+
+// NOTE: if you change this, change VIDEO_DRIVER_IS_PICO_HDMI in CMakeLists.txt
+// to match. CMake cannot read this header, and it needs to know: the library
+// driver requires the image to run from RAM rather than XIP.
+#define VIDEO_DRIVER            VIDEO_DRIVER_PICO_HDMI
+
 #define USB_CLOCK_TEST_MODE 0
 
 // ---------------------------------------------------------------------------
@@ -30,38 +49,36 @@
 // monitor accepts. It also leaves ~70x realtime headroom over the 3.58 MHz Z80.
 // Clocks.
 //
-// Three hard constraints, which cannot all be met from one PLL:
+// clk_sys MUST be an integer multiple of 12 MHz: Pico-PIO-USB derives its USB
+// bit timing by dividing clk_sys, and a non-integer ratio produces invalid USB
+// signalling that takes the shared TinyUSB stack down with it.
 //
-//   Pico-PIO-USB   clk_sys must be 120 or 240 MHz. Anything else and the host
-//                  stack hangs during tuh_task().
-//   DVI 640x480p60 clk_hstx must be 126 MHz, i.e. 5 x the 25.2 MHz pixel clock.
-//   Native USB     clk_usb must be 48 MHz for the MSC device.
+// The rest depends on which video driver is built:
 //
-// The RP2350 has two PLLs, so:
+//   VIDEO_DRIVER_PICO_HDMI
+//     The library sets clk_hstx = clk_sys / PICO_HDMI_HSTX_CLK_DIV, an integer
+//     divide, and 640x480p60 needs 126 MHz. Divider 2 gives clk_sys = 252 MHz,
+//     which is 21 x 12 -- so HDMI and PIO-USB agree on one PLL and pll_usb is
+//     left alone at its stock 48 MHz for the USB device.
 //
-//   pll_sys = 240 MHz -> clk_sys  = 240 MHz         (PIO-USB satisfied)
-//                     -> clk_usb  = 240 / 5 = 48    (native USB satisfied)
-//   pll_usb = 126 MHz -> clk_hstx = 126 MHz         (DVI exact, 60.00 Hz)
-//
-// pll_usb is retuned away from its default 48 MHz and no longer feeds clk_usb
-// at all -- see setup_clocks() in main.cpp, which must move clk_usb onto
-// pll_sys BEFORE retuning pll_usb.
-//
-// 240 MHz still leaves ~67x realtime headroom over the 3.58 MHz Z80.
-#if USB_CLOCK_TEST_MODE
-  #define CV_SYS_CLK_KHZ    120000    // matches the working PIO-USB examples
+//   VIDEO_DRIVER_HSTX
+//     Our own driver can source clk_hstx from anywhere, so clk_sys runs at
+//     240 MHz for PIO-USB and clk_hstx comes from a retuned pll_usb. That
+//     needs clk_usb re-sourced onto pll_sys first -- see setup_clocks().
+#if VIDEO_DRIVER == VIDEO_DRIVER_PICO_HDMI
+  #define CV_SYS_CLK_KHZ    252000
+  // NOTE: the matching divider is NOT set here. pico_hdmi reads it as a CMake
+  // cache variable (PICO_HDMI_HSTX_CLK_DIV) and never includes this file, so
+  // defining it here has no effect whatsoever. See CMakeLists.txt.
 #else
   #define CV_SYS_CLK_KHZ    240000
 #endif
+
 #define HSTX_CLK_HZ         126000000
 
-// pll_usb retune target for clk_hstx: VCO 1512 MHz / (6 x 2) = 126 MHz.
-//
-// Deliberately prefixed CV_. PLL_USB_POSTDIV1/2 and PLL_USB_VCO_FREQ_HZ are
-// SDK-owned macros that hardware/clocks.h uses to configure pll_usb to 48 MHz
-// at startup. Reusing those names silently changed the SDK's own idea of the
-// USB PLL in every file that included config.h before clocks.h -- which was
-// audio.cpp and video_hstx.cpp. Same trap as the SYS_CLK_KHZ collision.
+// pll_usb retune target, used only by VIDEO_DRIVER_HSTX:
+// VCO 1512 MHz / (6 x 2) = 126 MHz. Prefixed CV_ because PLL_USB_POSTDIV1/2
+// and PLL_USB_VCO_FREQ_HZ are SDK-owned names.
 #define CV_PLL_USB_VCO_HZ   1512000000
 #define CV_PLL_USB_POSTDIV1 6
 #define CV_PLL_USB_POSTDIV2 2
@@ -217,6 +234,24 @@
 // 15 of the shift register chain instead -- see cart_reader.cpp.
 #define CART_CS_PINS        { 10, 20, 21 }
 
+// How long to wait after asserting an address and chip select before sampling
+// the data bus, in microseconds.
+//
+// It has to cover the 74HC595 propagation delay plus the ROM's access time.
+// Period mask ROMs are typically 200-450 ns, but third-party and later
+// cartridges can be considerably slower, and the shield adds its own delay.
+//
+// The failure is not obvious: bytes come back partly correct and decay towards
+// zero rather than reading as garbage, so a cartridge looks unrecognised while
+// the address bus and everything else test fine. If a particular cartridge is
+// not detected but the probe shows the address bus working, raise this first.
+#define CART_ACCESS_US      8
+
+// Read every byte twice and require the two to agree, retrying a few times.
+// Costs roughly double the dump time -- still under a second for 32 KB -- and
+// turns a marginal read into a correct one rather than a silent corruption.
+#define CART_VERIFY_READS   1
+
 // Set to 0 to skip video_init() entirely. Everything still runs -- USB, SD,
 // the emulator -- there is just no DVI output and the menu draws into a
 // framebuffer nobody scans out. Use this to prove whether a USB or SD problem
@@ -237,6 +272,20 @@
 // tuh_init() and tuh_task() must run on the SAME core, which this guarantees.
 // Provided for bisecting a tuh_init() hang, not as a tuning knob.
 #define USB_HOST_ON_CORE1   1
+
+// ...except that pico_hdmi owns core 1 outright -- video_output_core1_run()
+// never returns -- so the host has to live on core 0 there, whatever the
+// setting above says.
+//
+// Forcing it here rather than special-casing each call site is what matters:
+// every `#if !USB_HOST_ON_CORE1` guard in menu.cpp, fatal() and the emulator
+// loop then services the stack automatically. Leaving it at 1 while the host
+// actually ran on core 0 meant the menu never called tuh_task(), so nothing
+// could enumerate: "USB: 0 devices, 0 HID, 0 pads".
+#if VIDEO_DRIVER == VIDEO_DRIVER_PICO_HDMI
+  #undef  USB_HOST_ON_CORE1
+  #define USB_HOST_ON_CORE1 0
+#endif
 
 // Set to 0 to compile out audio entirely. In the confirmed-working USB tester,
 // core 1 runs NOTHING but tuh_task() -- no audio, no PIO2, no second DMA pair.
@@ -288,6 +337,45 @@
 // is still silent -- or the push blocks forever, freezing the pad in the menu
 // -- the state machine is not pulling from its FIFO and the DMA was never the
 // problem.
+// ---------------------------------------------------------------------------
+// Where emulator sound goes.
+//
+//   AUDIO_SINK_CODEC  TLV320DAC3100 -> headphone jack / speaker connector
+//   AUDIO_SINK_HDMI   embedded in the HDMI stream as data islands
+//
+// HDMI audio is NOT implemented yet -- see the note in README.md. Selecting it
+// raises a #error rather than building something silently mute, because the
+// codec path works today and quietly losing it would be worse than not
+// building. Flip the default to AUDIO_SINK_HDMI once the transport lands.
+// ---------------------------------------------------------------------------
+#define AUDIO_SINK_CODEC    0
+#define AUDIO_SINK_HDMI     1
+
+#define AUDIO_SINK          AUDIO_SINK_HDMI
+
+// How many data island packets to keep queued. Each carries four samples, so
+// 200 packets is 800 samples -- about 18 ms at 44.1 kHz. Enough to ride out a
+// slow frame without adding noticeable latency.
+#define HDMI_AUDIO_QUEUE_TARGET 200
+
+
+// DMA channel PIO-USB transmits on. PIO_USB_DEFAULT_CONFIG hardcodes 0 without
+// claiming it, so we reserve it and hand it over just before tuh_init().
+//
+// pico_hdmi hardcodes channels 0 AND 1 for its own ping-pong and claims them
+// by name inside video_output_init(). dma_channel_claim() panics on a channel
+// that is already taken, and a panic reads as a hard fault -- so with that
+// driver PIO-USB has to sit elsewhere.
+#if VIDEO_DRIVER == VIDEO_DRIVER_PICO_HDMI
+  #define PIO_USB_TX_DMA_CH   2
+#else
+  #define PIO_USB_TX_DMA_CH   0
+#endif
+
+#if AUDIO_SINK == AUDIO_SINK_HDMI && VIDEO_DRIVER != VIDEO_DRIVER_PICO_HDMI
+#error "AUDIO_SINK_HDMI needs VIDEO_DRIVER_PICO_HDMI: the built-in HSTX driver emits no data islands."
+#endif
+
 // Which output the codec drives.
 //   1 = mono speaker connector (class-D amp; needs the board on 5V)
 //   0 = headphone jack only
@@ -344,6 +432,24 @@
 //                             on at least one board. Harmless: it is not a
 //                             valid header, so nothing is falsely detected.
 //   last byte != first        readings unstable, suspect timing
+// ---------------------------------------------------------------------------
+// Boot diagnostics: the long-pulse build check, the numbered boot-progress
+// blinks, and the per-call stage blinks inside video_init() and
+// usb_host_init().
+//
+// These were how every bring-up problem in this project got located, and they
+// are worth turning back on the moment something stops working. But they cost
+// about 25 seconds of boot -- roughly 90% of it -- because each blink group
+// deliberately pauses long enough to be counted.
+//
+// FATAL error codes are NOT affected. A failure still blinks its code forever,
+// which is the one signal that must always be available.
+// ---------------------------------------------------------------------------
+#define BOOT_DIAGNOSTICS    0
+
+// Stage blinks inside usb_host_init(). Requires BOOT_DIAGNOSTICS.
+#define USB_HOST_STAGE_BLINK 1
+
 #define SHOW_CART_DEBUG     0
 
 #define SHOW_HID_DEBUG      0
@@ -355,7 +461,7 @@
 // perfectly matched an older decoder, and it took a full round of analysis to
 // realise the source and the firmware had diverged. Bump this whenever you
 // change something you intend to test.
-#define ACJ_BUILD_ID        "build 37"
+#define ACJ_BUILD_ID        "build 53"
 
 
 // ---------------------------------------------------------------------------

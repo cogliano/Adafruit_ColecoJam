@@ -99,10 +99,30 @@ static volatile bool host_init_done = false;
 // of the calls below can block or panic, and panics on core 1 are silent.
 static volatile int init_step = 0;
 
-// PIO_USB_DEFAULT_CONFIG's default transmit DMA channel. Reserved early so the
-// video driver's allocator calls skip it, then released just before tuh_init()
-// so PIO-USB can claim it in the normal way.
-#define PIO_USB_TX_DMA_CH 0
+// Blink the step number before each call, the same trick video_init() uses.
+// There is a working display by this point, but usb_host.cpp sits below the UI
+// layer and the calls here are blocking, so the LED is still the practical
+// channel. Enabled by USB_HOST_STAGE_BLINK in config.h.
+static void hstage(int n) {
+#if !BOOT_DIAGNOSTICS
+    (void)n;
+    return;
+#endif
+#if USB_HOST_STAGE_BLINK
+    gpio_init(PIN_LED);
+    gpio_set_dir(PIN_LED, GPIO_OUT);
+    for (int i = 0; i < n; i++) {
+        gpio_put(PIN_LED, 0); sleep_ms(120);
+        gpio_put(PIN_LED, 1); sleep_ms(120);
+    }
+    sleep_ms(500);
+#else
+    (void)n;
+#endif
+}
+
+// PIO_USB_TX_DMA_CH is defined in config.h, next to VIDEO_DRIVER, because
+// the right value depends on which video driver is built.
 
 // ---------------------------------------------------------------------------
 // Report decoding
@@ -280,31 +300,47 @@ void usb_host_prepare(void) {
     // VBUS is already on: main() enables it immediately after the clocks, so
     // the hub has had time to settle long before we get here. Re-assert it
     // anyway, harmlessly, in case this is ever called without that.
+    hstage(1);
     init_step = 1;
     gpio_put(PIN_USB_HOST_5V_EN, USB_HOST_5V_ACTIVE_HIGH ? 1 : 0);
     init_step = 2;
 
+    hstage(2);
     pio_usb_configuration_t pio_cfg = PIO_USB_DEFAULT_CONFIG;
     pio_cfg.pin_dp = (uint8_t)PIN_USB_HOST_DP;
 
-    // Leave .tx_ch at its default of 0, exactly as the working tester does.
+    // Transmit DMA channel.
     //
-    // Overriding it with a channel from dma_claim_unused_channel() was wrong:
-    // PIO-USB claims tx_ch itself during tuh_init(), and hw_claim panics on an
-    // already-claimed resource. On core 1 that panic is completely silent, so
-    // it looked like tuh_init() hanging -- the same trap as the pio_sm_claim()
-    // calls I added and removed earlier.
+    // PIO_USB_DEFAULT_CONFIG hardcodes 0 and PIO-USB claims it itself inside
+    // tuh_init(). Which channel is safe depends on the video driver:
     //
-    // But we cannot simply leave it alone either: video_init() runs after this
-    // and takes channels 0 and 1 from the allocator, so PIO-USB's channel 0
-    // would end up shared with the DVI scanout.
+    //   VIDEO_DRIVER_HSTX      our driver allocates via dma_claim_unused_channel(),
+    //                          so channel 0 is reserved below and handed back
+    //                          just before tuh_init() claims it.
+    //   VIDEO_DRIVER_PICO_HDMI the library takes channels 0 AND 1 by name, so
+    //                          PIO-USB must be moved off them entirely. No
+    //                          reservation is needed -- nothing else allocates.
     //
-    // So reserve channel 0 here, before video_init() runs, and release it in
-    // usb_host_init() immediately before tuh_init(). Video is pushed to 1 and
-    // 2, and PIO-USB gets a clear channel 0 to claim for itself.
+    // Setting this explicitly matters: left at the default under pico_hdmi,
+    // PIO-USB would claim channel 0 during tuh_init() and panic against the
+    // library's own claim.
+    pio_cfg.tx_ch = (uint8_t)PIO_USB_TX_DMA_CH;
+
+    hstage(3);
+#if VIDEO_DRIVER == VIDEO_DRIVER_HSTX
+    // Reserve the transmit channel so video_init()'s dma_claim_unused_channel()
+    // calls skip it; released again just before tuh_init() lets PIO-USB claim
+    // it properly.
+    //
+    // Not done for pico_hdmi: that library takes channels 0 and 1 by name and
+    // never allocates, so nothing can steal this one and there is nothing to
+    // protect it from. Reserving it there added a claim/unclaim pair that had
+    // no purpose -- and the unclaim was where the boot faulted.
     dma_channel_claim(PIO_USB_TX_DMA_CH);
+#endif
     init_step = 3;
 
+    hstage(4);
     tuh_configure(BOARD_TUH_RHPORT, TUH_CFGID_RPI_PIO_USB_CONFIGURATION, &pio_cfg);
     init_step = 4;
 #endif
@@ -321,10 +357,15 @@ void usb_host_init(void) {
     // Release the channel reserved in usb_host_prepare() so PIO-USB can claim
     // it. video_init() has already run and taken its own channels, so nothing
     // else will grab this one in between.
+    hstage(5);
+#if VIDEO_DRIVER == VIDEO_DRIVER_HSTX
+    // Hand the reserved channel back so PIO-USB can claim it inside tuh_init().
     if (dma_channel_is_claimed(PIO_USB_TX_DMA_CH))
         dma_channel_unclaim(PIO_USB_TX_DMA_CH);
+#endif
     init_step = 6;
 
+    hstage(6);
     tuh_init(BOARD_TUH_RHPORT);
     init_step = 7;
     host_init_done = true;
