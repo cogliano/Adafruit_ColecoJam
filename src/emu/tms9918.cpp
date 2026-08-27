@@ -153,16 +153,27 @@ static void HOT(render_sprites)(int y, uint8_t *line) {
     const int      sprite_h  = (size16 ? 16 : 8) * (mag ? 2 : 1);
 
     int drawn = 0;
-    uint8_t collision_mask[VDP_ACTIVE_W];
-    memset(collision_mask, 0, sizeof(collision_mask));
+
+    // Marks every x where a sprite pattern bit has already been placed on this
+    // line. Serves two purposes: sprite coincidence detection, and priority --
+    // an occupied pixel belongs to a lower-numbered, higher-priority sprite and
+    // must not be overwritten.
+    uint8_t occupied[VDP_ACTIVE_W];
+    memset(occupied, 0, sizeof(occupied));
 
     for (int s = 0; s < 32; s++) {
         const uint16_t a = (uint16_t)(attr_base + s * 4);
         int sy = vdp.vram[a];
 
         if (sy == 208) break;                 // terminator
-        // Y is stored one line early and wraps into the top border.
-        sy = (sy > 224) ? (sy - 256) : sy;
+
+        // Y is stored one line early, so a sprite with Y=0 starts on line 1.
+        // Values above the terminator are negative, letting a sprite be
+        // partially scrolled off the top of the screen. The threshold is 208,
+        // not 224: 209..223 are equally negative, and treating them as large
+        // positives put those sprites off the bottom instead of clipping them
+        // at the top.
+        if (sy > 208) sy -= 256;
         sy += 1;
         if (y < sy || y >= sy + sprite_h) continue;
 
@@ -196,10 +207,24 @@ static void HOT(render_sprites)(int y, uint8_t *line) {
             int x = sx + px;
             if (x < 0 || x >= VDP_ACTIVE_W) continue;
 
-            if (collision_mask[x]) vdp.status |= 0x20;   // sprite collision
-            collision_mask[x] = 1;
+            if (occupied[x]) {
+                // Two sprite pattern bits on the same pixel: set the
+                // coincidence flag. This happens regardless of colour, and
+                // regardless of which sprite ends up visible.
+                vdp.status |= 0x20;
 
-            if (color) line[x] = color;                  // colour 0 is transparent
+                // Do NOT draw. The pixel already belongs to a lower-numbered
+                // sprite, which outranks this one. Overwriting here is what
+                // inverted sprite priority.
+                continue;
+            }
+            occupied[x] = 1;
+
+            // Colour 0 is transparent: the pixel still counts as occupied for
+            // priority and coincidence, but nothing is drawn, so the
+            // background shows through and lower-priority sprites stay hidden
+            // behind it -- which is what the hardware does.
+            if (color) line[x] = color;
         }
     }
 }
