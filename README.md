@@ -116,6 +116,40 @@ In VS Code: install the recommended extensions, then **Ctrl+Shift+B** runs the
 
 ---
 
+## Running under the pico-bootLoader
+
+[pico-bootLoader](https://github.com/fhoedemakers/pico-bootLoader) stays resident
+in the first 512 KB of flash and flashes and launches whichever application the
+user picks from an SD-card menu. A separate build is needed, because the image
+has to be linked into the application partition at `0x10080000` instead of the
+usual `0x10000000`:
+
+```bash
+./fruitjam-build-forbootloader.sh   # -> build_bl_fruitjam/colecojam.uf2
+```
+
+**Do not** drag that file onto the Fruit Jam over USB — it is linked for the
+application partition and will not boot on its own. Instead put it on the
+bootloader's SD card and let the picker flash it:
+
+1. Copy it to `/emu/8/colecojam.uf2` (`8` is the Fruit Jam HW_CONFIG; the
+   filename is cosmetic, the loader matches on the name inside the image).
+2. Add one row to `/emu/emulators.txt`, the loader's allow-list:
+   ```
+   colecojam;col;ColecoVision
+   ```
+   Artwork (`col.png`) already ships with the bootloader.
+
+Holding **Button 1** then returns to the picker rather than to the UF2
+bootloader. The standalone build above is unaffected and still behaves as
+documented.
+
+The build tree is kept separate from `build/` so the two variants never share
+stale objects. See `cmake/BootPartition.cmake` for the flash map and for why
+this project cannot use the loader's usual relink helper unmodified.
+
+---
+
 ## SD card layout
 
 Format the card **FAT32** and create:
@@ -163,7 +197,8 @@ then `1`. Select or Start on its own is what produces `*` or `#`.
 
 In the menu, D-pad browses (left/right page), **A** or **Start** loads. Board
 **Button 2** and **Button 3** also work if no pad is connected yet. Holding
-**Button 1** at any time reboots into the UF2 bootloader.
+**Button 1** at any time leaves the emulator: back to the picker when this build
+was launched from the pico-bootLoader, otherwise into the UF2 bootloader.
 
 ---
 

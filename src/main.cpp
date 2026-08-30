@@ -36,6 +36,7 @@
 #include "hw/usb_msc.h"
 #include "hw/cart_reader.h"
 #include "hw/hdmi_audio.h"
+#include "hw/bootloader.h"
 #include "ui/menu.h"
 
 extern "C" {
@@ -292,6 +293,17 @@ static uint32_t load_file(const char *path, uint8_t *dst, uint32_t max_len) {
     return (r == FR_OK) ? (uint32_t)br : 0;
 }
 
+// Leave the emulator. Under the pico-bootLoader the useful destination is its
+// picker, not the RP2350 USB drive -- the user picked us from a menu and expects
+// to get back to it. Standalone there is no menu to return to, so fall through
+// to BOOTSEL as before. The test is made at runtime, so one binary is right
+// both ways.
+[[noreturn]] static void coleco_exit(void) {
+    if (coleco_launched_from_bootloader()) coleco_return_to_bootloader();
+    reset_usb_boot(0, 0);
+    for (;;) tight_loop_contents();   // reset_usb_boot() does not return
+}
+
 // ---------------------------------------------------------------------------
 // Fatal error: show it on screen and stop, but keep USB alive so the user can
 // still fix the SD card contents over the drag-and-drop drive.
@@ -331,7 +343,7 @@ static uint32_t load_file(const char *path, uint8_t *dst, uint32_t max_len) {
             if (!gpio_get(PIN_BUTTON1)) {
                 int held = 0;
                 while (!gpio_get(PIN_BUTTON1) && held < 20) { sleep_ms(10); held++; }
-                if (held >= 20) reset_usb_boot(0, 0);
+                if (held >= 20) coleco_exit();
             }
             sleep_ms(10);
         }
@@ -403,14 +415,16 @@ static uint32_t load_file(const char *path, uint8_t *dst, uint32_t max_len) {
         }
 #endif
 
-        // Button 1 returns to the bootloader so new firmware can be flashed
-        // without reaching for the BOOTSEL/reset dance. It must be HELD for a
-        // second: the same button now also requests USB drive mode at boot,
-        // and a momentary read would turn that press into a surprise reboot.
+        // Button 1 leaves the emulator -- back to the pico-bootLoader picker
+        // when we were launched from it, otherwise to the UF2 bootloader so new
+        // firmware can be flashed without the BOOTSEL/reset dance. It must be
+        // HELD for a second: the same button also requests USB drive mode at
+        // boot, and a momentary read would turn that press into a surprise
+        // reboot.
         if (!gpio_get(PIN_BUTTON1)) {
             int held = 0;
             while (!gpio_get(PIN_BUTTON1) && held < 100) { sleep_ms(10); held++; }
-            if (held >= 100) reset_usb_boot(0, 0);
+            if (held >= 100) coleco_exit();
         }
 
         // Pace to the display. The VDP frame is 59.92 Hz and DVI is 60 Hz, so

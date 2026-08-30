@@ -66,6 +66,7 @@ add_executable(colecojam
     src/hw/usb_msc.cpp
     src/hw/usb_descriptors.cpp
     src/hw/cart_reader.cpp
+    src/hw/bootloader.c
 
     src/ui/menu.cpp
 
@@ -94,7 +95,18 @@ target_compile_definitions(colecojam PRIVATE
     PICO_DEFAULT_UART_RX_PIN=9
     PICO_STDIO_USB=0                 # USB is used for MSC, not a console
     PICO_XOSC_STARTUP_DELAY_MULTIPLIER=64
+    # src/hw/bootloader.c emits the binary_info program-name record itself, in
+    # flash, because the SDK's own copy ends up in RAM under copy_to_ram and the
+    # pico-bootLoader then cannot read it. Suppress the SDK's so there is exactly
+    # one such record.
+    PICO_NO_BI_PROGRAM_NAME=1
 )
+
+# The name the pico-bootLoader matches against its /emu/emulators.txt allow-list
+# (see src/hw/bootloader.c). PICO_TARGET_NAME would already yield "colecojam",
+# but that is an implicit fallback; say it out loud, and give bootloader.c a
+# PICO_PROGRAM_NAME to build its record from.
+pico_set_program_name(colecojam "colecojam")
 
 target_compile_options(colecojam PRIVATE
     -O3
@@ -116,6 +128,7 @@ target_link_libraries(colecojam
     hardware_irq
     hardware_clocks
     hardware_vreg
+    hardware_watchdog
     tinyusb_device
     tinyusb_board
 )
@@ -277,6 +290,21 @@ if(VIDEO_DRIVER_IS_PICO_HDMI)
     message(STATUS "colecojam: copy_to_ram enabled for pico_hdmi timing")
 endif()
 
+# --- pico-bootLoader variant -----------------------------------------------
+# OFF gives the normal standalone image, linked at 0x10000000 and flashed over
+# BOOTSEL. ON relinks into the resident bootloader's application partition at
+# 0x10080000 so its picker can flash and launch us; see cmake/BootPartition.cmake
+# for the flash map and for why the usual helper cannot be used verbatim here.
+# Use ./fruitjam-build-forbootloader.sh rather than setting this by hand.
+#
+# Must come after pico_set_binary_type() above -- the relink picks its approach
+# from the target's binary type -- and before pico_add_extra_outputs() below.
+option(BUILD_FOR_BOOTLOADER "Relink for the pico-bootLoader app partition" OFF)
+if(BUILD_FOR_BOOTLOADER)
+    include(${CMAKE_CURRENT_LIST_DIR}/cmake/BootPartition.cmake)
+    coleco_offset_for_bootloader(colecojam)
+endif()
+
 # --- Output ----------------------------------------------------------------
 pico_add_extra_outputs(colecojam)     # produces .uf2, .elf, .bin, .hex
 
@@ -284,9 +312,17 @@ pico_add_extra_outputs(colecojam)     # produces .uf2, .elf, .bin, .hex
 pico_enable_stdio_usb(colecojam 0)
 pico_enable_stdio_uart(colecojam 1)
 
-# Rename the .uf2 to something recognisable on the RP2350 bootloader drive.
-add_custom_command(TARGET colecojam POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy
-        $<TARGET_FILE_DIR:colecojam>/colecojam.uf2
-        ${CMAKE_CURRENT_LIST_DIR}/build/Adafruit_ColecoJam.uf2
-    COMMENT "UF2 written to build/Adafruit_ColecoJam.uf2")
+# Copy the .uf2 to something recognisable on the RP2350 bootloader drive.
+#
+# Skipped for the bootloader variant: there the file that matters is the
+# target's own colecojam.uf2, which is what pico-bootLoader's build_emulators.sh
+# looks for and what has to be named colecojam.uf2 on the SD card. Copying to a
+# fixed ${CMAKE_CURRENT_LIST_DIR}/build/ path would also have let the two build
+# trees overwrite each other's output.
+if(NOT BUILD_FOR_BOOTLOADER)
+    add_custom_command(TARGET colecojam POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy
+            $<TARGET_FILE_DIR:colecojam>/colecojam.uf2
+            ${CMAKE_BINARY_DIR}/Adafruit_ColecoJam.uf2
+        COMMENT "UF2 written to Adafruit_ColecoJam.uf2")
+endif()
