@@ -47,6 +47,6 @@
                 "monitor reset init",
                 "load \"${command:raspberry-pi-pico.launchTargetPath}\""
             ]
-        },
+        }
     ]
 }

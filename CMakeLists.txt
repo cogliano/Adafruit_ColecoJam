@@ -26,7 +26,8 @@ set(PICO_PLATFORM rp2350-arm-s     CACHE STRING "Target platform")
 
 include(pico_sdk_import.cmake)
 
-project(Adafruit_ColecoJam C CXX ASM)
+#project(Adafruit_ColecoJam C CXX ASM)
+project(ColecoJam C CXX ASM)
 
 pico_sdk_init()
 
@@ -289,4 +290,7 @@ add_custom_command(TARGET colecojam POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy
         $<TARGET_FILE_DIR:colecojam>/colecojam.uf2
         ${CMAKE_CURRENT_LIST_DIR}/build/Adafruit_ColecoJam.uf2
+    COMMAND ${CMAKE_COMMAND} -E copy
+        $<TARGET_FILE_DIR:colecojam>/colecojam.elf
+        ${CMAKE_CURRENT_LIST_DIR}/build/Adafruit_ColecoJam.elf
     COMMENT "UF2 written to build/Adafruit_ColecoJam.uf2")

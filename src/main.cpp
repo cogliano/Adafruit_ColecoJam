@@ -38,6 +38,10 @@
 #include "hw/hdmi_audio.h"
 #include "ui/menu.h"
 
+// Character row for the in-game debug overlay: below the 256x192 picture,
+// which ends at row 26 of the 30-row 320x240 framebuffer.
+#define ROWS_DEBUG 28
+
 extern "C" {
 #include "ff.h"
 }
@@ -411,6 +415,98 @@ static uint32_t load_file(const char *path, uint8_t *dst, uint32_t max_len) {
             int held = 0;
             while (!gpio_get(PIN_BUTTON1) && held < 100) { sleep_ms(10); held++; }
             if (held >= 100) reset_usb_boot(0, 0);
+        }
+
+#if EMU_DEBUG_OVERLAY
+        // Emulated CPU state, refreshed a few times a second in the border
+        // below the picture. When the game locks up this freezes with it, and
+        // what it freezes ON says which kind of failure it is:
+        //
+        //   PC parked in ROM with IFF off and HALT set -> waiting for an
+        //     interrupt that never comes: a VDP/NMI problem
+        //   PC at 0038 or cycling in a tiny range -> executing 0xFF from
+        //     unmapped memory, i.e. it already jumped somewhere wrong
+        //   SP outside 6000-7FFF -> the stack has escaped the 1 KB of RAM,
+        //     which corrupts everything shortly afterwards
+        {
+            static uint32_t dbg = 0;
+            static uint16_t pc_lo = 0xFFFF, pc_hi = 0x0000;
+            if (++dbg >= 20) {
+                dbg = 0;
+                char l[48];
+                snprintf(l, sizeof(l),
+                         "PC%04X SP%04X HL%04X(%02X) A%02X %s",
+                         z80.pc.w, z80.sp.w, z80.hl.w,
+                         cv_bus_read(z80.hl.w), z80.af.b.h,
+                         z80.iff1 ? "EI" : "DI");
+                menu_debug_line(ROWS_DEBUG, l);
+
+                // Second line: the vertical-blank machinery, plus how far the
+                // PC has ranged since the last refresh.
+                //
+                //   NMI  should climb by ~20 between refreshes (20 frames)
+                //   RD   status-register reads; the NMI handler must do one
+                //        per frame to clear the flag and release the line
+                //   PC range collapsing to a few bytes means a tight wait loop
+                static uint32_t prev_nmi = 0, prev_rd = 0;
+                char l2[48];
+                snprintf(l2, sizeof(l2),
+                         "F%lu A%lu N%lu R%lu ST%02X",
+                         (unsigned long)(vdp_frame_flags  % 100000),
+                         (unsigned long)(vdp_irq_asserts  % 100000),
+                         (unsigned long)(cv_nmi_count     % 100000),
+                         (unsigned long)(vdp_status_reads % 100000),
+                         vdp.status);
+                (void)prev_nmi; (void)prev_rd;
+                prev_nmi = cv_nmi_count;
+                prev_rd  = vdp_status_reads;
+                menu_debug_line(ROWS_DEBUG + 1, l2);
+
+                // Third line: the bytes the CPU is sitting on, and the top of
+                // the stack.
+                //
+                //   18 FE          JR $  -- a deliberate hang, so the game
+                //                  reached its own error trap
+                //   C3 xx xx       JP to itself, same thing
+                //   FF FF FF FF    executing unmapped memory; it jumped into
+                //                  nothing and the "loop" is RST 38 recursion
+                //
+                // The stack words are the most useful part: the top one is
+                // usually the return address of whatever called into this,
+                // which names the code path that went wrong.
+                char l3[48];
+                snprintf(l3, sizeof(l3),
+                         "lastNMI@%04X rd%lu vec%04X",
+                         cv_last_nmi_pc,
+                         (unsigned long)(vdp_status_reads - cv_reads_at_nmi),
+                         cv_nmi_vector);
+                menu_debug_line(ROWS_DEBUG - 1, l3);
+
+                pc_lo = 0xFFFF; pc_hi = 0x0000;
+            }
+
+            // Track how far the PC wanders between refreshes. A wide range is
+            // normal execution; a range of a few bytes is a spin loop.
+            if (z80.pc.w < pc_lo) pc_lo = z80.pc.w;
+            if (z80.pc.w > pc_hi) pc_hi = z80.pc.w;
+        }
+#endif
+
+        // Heartbeat: one LED toggle per second while the emulator loop runs.
+        //
+        // Without it a frozen picture is indistinguishable from a dead board,
+        // and the two need completely different investigation. If the picture
+        // stops while this keeps ticking, the RP2350 is fine and the emulated
+        // machine has locked up -- a CPU or VDP emulation bug. If it stops
+        // too, the host has hung or faulted.
+        {
+            static uint32_t beat = 0;
+            if (++beat >= 60) {
+                beat = 0;
+                static bool on = false;
+                on = !on;
+                gpio_put(PIN_LED, on ? 0 : 1);
+            }
         }
 
         // Pace to the display. The VDP frame is 59.92 Hz and DVI is 60 Hz, so

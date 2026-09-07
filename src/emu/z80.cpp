@@ -280,6 +280,18 @@ static inline uint8_t op_in_c(void) {
 // ---------------------------------------------------------------------------
 // Cycle tables (T-states, base cost; conditional extras added inline)
 // ---------------------------------------------------------------------------
+// Prefix opcodes (CB, ED, DD, FD) carry their own totals in the handler, so
+// most are 0 here -- EXCEPT 0xCB, which is 4.
+//
+// exec_cb() adds only the operation's own cost (4 for a register op, 8 for
+// BIT (HL), 11 for RES/SET (HL)), not the 4 T-states of the prefix fetch. Left
+// at 0 every CB instruction ran a third to a half too fast. ED and DD/FD tables
+// already include the prefix, which is why only this one was wrong.
+//
+// The effect is subtle and cumulative: bit tests and shifts are everywhere in
+// game code, so the emulated CPU outruns the real one by a few percent overall
+// and by far more inside a tight loop of shifts. Software timing loops finish
+// early and code that races the VDP loses.
 static const uint8_t cyc_main[256] = {
      4,10, 7, 6, 4, 4, 7, 4, 4,11, 7, 6, 4, 4, 7, 4,
      8,10, 7, 6, 4, 4, 7, 4,12,11, 7, 6, 4, 4, 7, 4,
@@ -293,7 +305,7 @@ static const uint8_t cyc_main[256] = {
      4, 4, 4, 4, 4, 4, 7, 4, 4, 4, 4, 4, 4, 4, 7, 4,
      4, 4, 4, 4, 4, 4, 7, 4, 4, 4, 4, 4, 4, 4, 7, 4,
      4, 4, 4, 4, 4, 4, 7, 4, 4, 4, 4, 4, 4, 4, 7, 4,
-     5,10,10,10,10,11, 7,11, 5,10,10, 0,10,17, 7,11,
+     5,10,10,10,10,11, 7,11, 5,10,10, 4,10,17, 7,11,
      5,10,10,11,10,11, 7,11, 5, 4,10,11,10, 0, 7,11,
      5,10,10,19,10,11, 7,11, 5, 4,10, 4,10, 0, 7,11,
      5,10,10, 4,10,11, 7,11, 5, 6,10, 4,10, 0, 7,11,

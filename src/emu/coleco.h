@@ -39,6 +39,21 @@ struct CVController {
 
 extern CVController cv_pad[2];
 
+// NMIs delivered since reset. The vertical blank drives every ColecoVision
+// game's main loop, so this advancing at ~60/s is the sign of a healthy
+// machine; frozen while the CPU still runs means the game is waiting on an
+// interrupt that stopped coming.
+extern uint32_t cv_nmi_count;
+
+// Latched interrupt-line state used for edge detection.
+bool cv_prev_irq(void);
+
+// Captured when the last NMI was raised: where the CPU was, the status-read
+// count at that moment, and the BIOS RAM dispatch hook.
+extern uint16_t cv_last_nmi_pc;
+extern uint32_t cv_reads_at_nmi;
+extern uint16_t cv_nmi_vector;
+
 bool cv_init(const uint8_t *bios, uint32_t bios_len);
 void cv_load_rom(const uint8_t *rom, uint32_t len);
 void cv_reset(void);

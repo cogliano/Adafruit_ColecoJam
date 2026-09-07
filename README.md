@@ -57,6 +57,24 @@ Switching back to `AUDIO_SINK_CODEC` with `VIDEO_DRIVER_HSTX` restores the
 previous arrangement exactly: 240 MHz, `clk_hstx` from a retuned `pll_usb`, and
 USB host on core 1.
 
+## Diagnostics
+
+Every bring-up problem in this project was found by measurement rather than
+reasoning, and the instruments are still in `include/config.h`, all off by
+default. Turn one on when something misbehaves:
+
+| Switch | Shows |
+|---|---|
+| `BOOT_DIAGNOSTICS` | numbered boot-progress blinks and per-call stage blinks inside `video_init()` and `usb_host_init()`. Costs ~25 s of boot. |
+| `EMU_DEBUG_OVERLAY` | emulated Z80 and VDP state in the border below the picture: PC, SP, HL and the byte it points at, interrupt counters, the bytes at PC. |
+| `SHOW_CART_DEBUG` | cartridge probe bytes: bank 0 at four addresses, then each chip select. |
+| `SHOW_HID_DEBUG` | raw HID reports and the decoded button mask. |
+| `AUDIO_TEST_TONE` | 440 Hz tone in place of emulator sound, to separate the audio path from the PSG. |
+| `AUDIO_CPU_FEED` | bypasses the audio DMA entirely. |
+
+Fatal error codes and the hard-fault blink are always active. A hard fault is
+three slow blinks, then a pause, repeating.
+
 ## Status
 
 Built and confirmed working on real hardware: 640x480p60 DVI over HSTX, SD card
