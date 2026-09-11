@@ -19,6 +19,35 @@
 
 TMS9918 vdp;
 
+// Status-register reads. A game's NMI handler must read this to clear the
+// frame flag and release the interrupt line; if reads stop, the line stays
+// asserted and no further NMI edge can occur.
+uint32_t vdp_status_reads = 0;
+
+// Times the frame flag was raised at the end of active display, and times the
+// interrupt line was actually asserted as a result. These differ whenever the
+// flag is set while interrupts are disabled -- which is normal, and is exactly
+// the case where an edge can go missing later.
+uint32_t vdp_frame_flags  = 0;
+uint32_t vdp_irq_asserts  = 0;
+
+static void (*irq_callback)(void) = nullptr;
+
+void vdp_set_irq_callback(void (*cb)(void)) { irq_callback = cb; }
+
+// Single point of control for the interrupt output. Raises the callback on
+// every released -> asserted transition, so no edge can be lost no matter how
+// often the line changes within a scanline.
+static inline void vdp_set_irq_line(bool asserted) {
+    if (asserted && !vdp.irq) {
+        vdp.irq = true;
+        vdp_irq_asserts++;
+        if (irq_callback) irq_callback();
+    } else {
+        vdp.irq = asserted;
+    }
+}
+
 // The classic TMS9918A palette, converted to RGB565.
 // (Values are the widely used Sean Young / TI datasheet RGB set.)
 static const uint8_t pal_rgb[16][3] = {
@@ -98,10 +127,11 @@ uint8_t vdp_read_data(void) {
 }
 
 uint8_t vdp_read_status(void) {
+    vdp_status_reads++;
     uint8_t v = vdp.status;
     vdp.status &= 0x1F;              // clear INT, 5S and collision
     vdp.second_write = false;
-    vdp.irq = false;
+    vdp_set_irq_line(false);          // reading the status releases the line
     return v;
 }
 
@@ -134,9 +164,11 @@ void vdp_write_control(uint8_t value) {
         int r = value & 0x07;
         vdp.reg[r] = vdp.first_byte;
         if (r == 1) {
-            // Enabling interrupts while the flag is already set fires straight
-            // away -- several games depend on this at start-up.
-            vdp.irq = irq_enabled() && (vdp.status & 0x80);
+            // Enabling interrupts while the frame flag is already set asserts
+            // the line immediately, which must raise an NMI right there --
+            // several games rely on it at start-up, and going through
+            // vdp_set_irq_line() means the edge cannot be missed.
+            vdp_set_irq_line(irq_enabled() && (vdp.status & 0x80));
         }
         break; }
     }
@@ -145,6 +177,12 @@ void vdp_write_control(uint8_t value) {
 // ---------------------------------------------------------------------------
 // Sprite rendering (shared by graphics modes 1, 2 and 3)
 // ---------------------------------------------------------------------------
+// NOTE on the coincidence flag: it is set whenever two sprite PATTERN bits
+// land on the same pixel, whether or not either sprite is visible. A colour-0
+// sprite is transparent but still has pattern bits and still collides. Games
+// that use coincidence for hit detection depend on this; suppressing it for
+// transparent sprites, or setting it for sprites past the four-per-line limit,
+// both change game logic in ways that only show up much later.
 static void HOT(render_sprites)(int y, uint8_t *line) {
     const uint16_t attr_base = (uint16_t)((R5 & 0x7F) << 7);
     const uint16_t patt_base = (uint16_t)((R6 & 0x07) << 11);
@@ -352,7 +390,8 @@ bool HOT(vdp_scanline)(uint16_t *dest) {
 
     if (y == VDP_ACTIVE_H) {
         vdp.status |= 0x80;                    // frame flag
-        if (irq_enabled()) vdp.irq = true;
+        vdp_frame_flags++;
+        if (irq_enabled()) vdp_set_irq_line(true);
         frame_irq = true;
     }
 

@@ -43,3 +43,19 @@ void    vdp_write_data(uint8_t value);
 void    vdp_write_control(uint8_t value);
 
 extern uint16_t vdp_palette_rgb565[16];
+
+// Count of status-register reads, for diagnosing a stalled vertical blank.
+extern uint32_t vdp_status_reads;
+extern uint32_t vdp_frame_flags;   // frame flag raised (once per frame)
+extern uint32_t vdp_irq_asserts;   // interrupt line went from released to asserted
+
+// Called by the VDP whenever its interrupt output goes from released to
+// asserted. The ColecoVision wires that output to the Z80 /NMI, which latches
+// the falling edge, so this is where the NMI must be raised.
+//
+// It has to be a callback rather than a per-scanline poll: the CPU can read
+// the status register and write register 1 several times within one scanline,
+// so the line can go asserted -> released -> asserted between two samples.
+// Polling misses that edge entirely, and since nothing afterwards reads the
+// status register the line stays asserted for good and the machine deadlocks.
+void vdp_set_irq_callback(void (*cb)(void));

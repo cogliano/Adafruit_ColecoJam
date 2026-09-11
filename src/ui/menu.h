@@ -15,3 +15,8 @@ bool menu_select_rom(char *out_path, size_t out_len);
 
 void menu_message(const char *title, const char *line1, const char *line2,
                   bool is_error);
+
+// Draw one line of text at a character row, clearing that row first. Used for
+// the in-game debug overlay, which lives in the border around the 256x192
+// ColecoVision image and so never disturbs the picture.
+void menu_debug_line(int row, const char *text);

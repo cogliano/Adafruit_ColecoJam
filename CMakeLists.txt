@@ -26,7 +26,8 @@ set(PICO_PLATFORM rp2350-arm-s     CACHE STRING "Target platform")
 
 include(pico_sdk_import.cmake)
 
-project(Adafruit_ColecoJam C CXX ASM)
+#project(Adafruit_ColecoJam C CXX ASM)
+project(ColecoJam C CXX ASM)
 
 pico_sdk_init()
 
@@ -312,7 +313,8 @@ pico_add_extra_outputs(colecojam)     # produces .uf2, .elf, .bin, .hex
 pico_enable_stdio_usb(colecojam 0)
 pico_enable_stdio_uart(colecojam 1)
 
-# Copy the .uf2 to something recognisable on the RP2350 bootloader drive.
+# Copy the .uf2 and .elf to something recognisable on the RP2350 bootloader
+# drive.
 #
 # Skipped for the bootloader variant: there the file that matters is the
 # target's own colecojam.uf2, which is what pico-bootLoader's build_emulators.sh
@@ -324,5 +326,8 @@ if(NOT BUILD_FOR_BOOTLOADER)
         COMMAND ${CMAKE_COMMAND} -E copy
             $<TARGET_FILE_DIR:colecojam>/colecojam.uf2
             ${CMAKE_BINARY_DIR}/Adafruit_ColecoJam.uf2
-        COMMENT "UF2 written to Adafruit_ColecoJam.uf2")
+        COMMAND ${CMAKE_COMMAND} -E copy
+            $<TARGET_FILE_DIR:colecojam>/colecojam.elf
+            ${CMAKE_BINARY_DIR}/Adafruit_ColecoJam.elf
+        COMMENT "UF2 and ELF written to Adafruit_ColecoJam.uf2 / .elf")
 endif()

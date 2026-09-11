@@ -536,3 +536,15 @@ void menu_message(const char *title, const char *line1, const char *line2,
     if (line1) draw_text_centered(13, line1, COL_TEXT, COL_BG, false);
     if (line2) draw_text_centered(15, line2, COL_DIM,  COL_BG, false);
 }
+
+// ---------------------------------------------------------------------------
+// Debug overlay
+// ---------------------------------------------------------------------------
+// The emulated image is 256x192 centred in a 320x240 framebuffer, leaving a
+// 32-pixel side border and 24 pixels top and bottom. Rows 27-29 are entirely
+// outside the picture, so text there costs the game nothing.
+void menu_debug_line(int row, const char *text) {
+    if (row < 0 || row >= ROWS) return;
+    video_fill_rect(0, row * CHAR_H, FB_WIDTH, CHAR_H, RGB565(0, 0, 0));
+    draw_text(0, row, text, COL_DIM, COL_BG, false);
+}

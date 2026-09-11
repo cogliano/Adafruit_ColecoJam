@@ -448,7 +448,13 @@
 #define BOOT_DIAGNOSTICS    0
 
 // Stage blinks inside usb_host_init(). Requires BOOT_DIAGNOSTICS.
-#define USB_HOST_STAGE_BLINK 1
+#define USB_HOST_STAGE_BLINK 0
+
+// Show the emulated Z80's state in the border below the picture during play.
+// Costs nothing visually -- the 256x192 image leaves rows 27-29 empty -- and
+// answers what a "crash" actually is: a runaway PC, a HALT with interrupts
+// disabled, or a stack that has wandered out of the 1 KB of RAM.
+#define EMU_DEBUG_OVERLAY   0
 
 #define SHOW_CART_DEBUG     0
 
@@ -461,7 +467,7 @@
 // perfectly matched an older decoder, and it took a full round of analysis to
 // realise the source and the firmware had diverged. Bump this whenever you
 // change something you intend to test.
-#define ACJ_BUILD_ID        "build 54"
+#define ACJ_BUILD_ID        "build 64"
 
 
 // ---------------------------------------------------------------------------
