@@ -44,6 +44,30 @@ else
     echo "pico_hdmi already present."
 fi
 
+# --- tusb_xinput -----------------------------------------------------------
+# TinyUSB host class driver for XInput pads (Xbox 360 / One / Series).
+#
+# Pinned to cfd83ba, NOT the fork's tip. The very next commit (ae4f3a9, "Fix
+# return type and value for xinputh_open to conform to new API") changes
+# xinputh_open() from bool to uint16_t for a TinyUSB revision newer than the
+# one Pico SDK 2.3.0 ships, whose usbh_class_driver_t still declares
+#
+#     bool (* const open)(uint8_t, uint8_t, tusb_desc_interface_t const *, uint16_t);
+#
+# Building the tip against 2.3.0 fails outright on that incompatible pointer
+# type. If this project is ever moved to an SDK carrying the newer TinyUSB,
+# move this pin forward to 915b21ac at the same time.
+#
+# A full clone is needed because --depth 1 cannot reach an arbitrary SHA.
+if [ ! -f "$TP/tusb_xinput/xinput_host.c" ]; then
+    echo "Fetching tusb_xinput..."
+    git clone https://github.com/PicoPlus-devel/tusb_xinput.git "$TP/tusb_xinput"
+    git -C "$TP/tusb_xinput" checkout --quiet \
+        cfd83ba9b0809cf69f7b63d351f44ff73ebd0e30
+else
+    echo "tusb_xinput already present."
+fi
+
 echo
 echo "Done. Now:"
 echo "  export PICO_SDK_PATH=/path/to/pico-sdk"

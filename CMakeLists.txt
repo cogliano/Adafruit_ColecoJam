@@ -50,6 +50,12 @@ if(NOT EXISTS ${PIO_USB_DIR}/src/pio_usb.c)
         "Pico-PIO-USB not found. Run tools/fetch_deps.sh.")
 endif()
 
+set(XINPUT_DIR ${CMAKE_CURRENT_LIST_DIR}/third_party/tusb_xinput)
+if(NOT EXISTS ${XINPUT_DIR}/xinput_host.c)
+    message(FATAL_ERROR
+        "tusb_xinput not found. Run tools/fetch_deps.sh.")
+endif()
+
 # --- Executable ------------------------------------------------------------
 add_executable(colecojam
     src/main.cpp
@@ -64,6 +70,8 @@ add_executable(colecojam
     src/hw/audio.cpp
     src/hw/sdcard.cpp
     src/hw/usb_host.cpp
+    src/hw/gamepad.cpp
+    src/hw/hid_app.cpp
     src/hw/usb_msc.cpp
     src/hw/usb_descriptors.cpp
     src/hw/cart_reader.cpp
@@ -92,8 +100,30 @@ target_compile_definitions(colecojam PRIVATE
     # standalone. It switches pio_usb over to TinyUSB's memory and interrupt
     # ownership; without it tuh_init() can hang outright.
     PIO_USB_USE_TINYUSB=1
+
+    # Debug console: UART1 on GPIO 8/9, the board default.
+    #
+    # The ESP32-C6 WiFi module shares GPIO 8/9 and drives them itself, so the
+    # output there may not be readable.
+    #
+    # UART0 on GPIO 44/45 (the A4/A5 header pins) gives a clean console -- it is
+    # what pico_shared/BoardConfigs.cmake uses for HW_CONFIG 8 -- but it works
+    # ONLY WITH THE CARTRIDGE READER SHIELD REMOVED. GPIO 44/45 are cartridge
+    # data lines D4 and D1, and a serial adapter's TX on GPIO 45 drives D1 while
+    # a cartridge is read, which can stop the cartridge being detected or
+    # corrupt its contents. To use it, replace the three lines below with:
+    #
+    #     PICO_DEFAULT_UART=0
+    #     PICO_DEFAULT_UART_TX_PIN=44
+    #     PICO_DEFAULT_UART_RX_PIN=45
+    #
+    # All three change together: GPIO 8/9 belong to UART1, GPIO 44/45 to UART0.
+    # They reach stdio_uart.c because pico_stdio_uart is an INTERFACE library,
+    # compiled into this target, so it sees these PRIVATE definitions.
+    PICO_DEFAULT_UART=1
     PICO_DEFAULT_UART_TX_PIN=8
     PICO_DEFAULT_UART_RX_PIN=9
+
     PICO_STDIO_USB=0                 # USB is used for MSC, not a console
     PICO_XOSC_STARTUP_DELAY_MULTIPLIER=64
     # src/hw/bootloader.c emits the binary_info program-name record itself, in
@@ -101,6 +131,14 @@ target_compile_definitions(colecojam PRIVATE
     # pico-bootLoader then cannot read it. Suppress the SDK's so there is exactly
     # one such record.
     PICO_NO_BI_PROGRAM_NAME=1
+
+    # Start the Adafruit NES- and SNES-style pads (USB ID 081f:e401, handled as
+    # a "MantaPad" by hid_app.cpp) in SNES mode, so all four face buttons work
+    # as soon as the pad is plugged in. Both controllers share that ID, so the
+    # cost falls on the NES-style pad: it sends B on the SNES pad's X bit, which
+    # therefore reads as X. Upstream's default of 1 does the reverse -- NES mode
+    # until Y is pressed.
+    MANTAPAD_DEFAULT_MODE=2
 )
 
 # The name the pico-bootLoader matches against its /emu/emulators.txt allow-list
@@ -195,6 +233,19 @@ endif()
 add_subdirectory(${PIO_USB_DIR} pico_pio_usb)
 
 target_link_libraries(colecojam pico_pio_usb)
+
+# --- tusb_xinput -----------------------------------------------------------
+# TinyUSB host class driver for XInput pads (Xbox 360 / One / Series), which do
+# not speak HID. hid_app.cpp registers it through usbh_app_driver_get_cb().
+#
+# Compiled straight into this target rather than through the library's own
+# CMakeLists, which declares an INTERFACE library linking a target named
+# "tinyusb" -- that does not exist in the Pico SDK, and later revisions of the
+# same file link tinyusb_host, which would drag in the native RP2040 host
+# controller driver this build deliberately leaves out (see tinyusb_host_base
+# above).
+target_sources(colecojam PRIVATE ${XINPUT_DIR}/xinput_host.c)
+target_include_directories(colecojam PRIVATE ${XINPUT_DIR})
 
 # Silence -Wattributes on Pico-PIO-USB's own sources.
 #

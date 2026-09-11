@@ -254,7 +254,8 @@ static void draw_frame(int selected, int scroll, const char *status,
             } else {
                 // Decoded bitmask as well as the raw bytes. The raw dump only
                 // proves the controller sent something; this proves how
-                // decode_report() understood it. Expected values:
+                // hid_app.cpp understood it. These are the MENU_* bits from
+                // usb_host.h, not the raw report. Expected values:
                 //   UP 0001  DOWN 0002  LEFT 0004  RIGHT 0008
                 //   A  0010  B    0020  X    0040  Y     0080
                 //   L  0100  R    0200  SELECT 0400  START 0800
@@ -348,17 +349,20 @@ bool menu_select_rom(char *out_path, size_t out_len) {
         // pass and repaints exactly when there is something new to say.
         {
             static int  last_pads = -1, last_dev = -1, last_hid = -1;
-            static int  last_step = -1;
+            static int  last_step = -1, last_kb = -1;
             const int   now_pads = usb_host_pad_count();
             const int   now_dev  = usb_host_dev_seen();
             const int   now_hid  = usb_host_hid_seen();
             const int   now_step = usb_host_init_step();
+            const int   now_kb   = usb_host_keyboard_connected() ? 1 : 0;
             if (now_pads != last_pads || now_dev != last_dev ||
-                now_hid  != last_hid  || now_step != last_step) {
+                now_hid  != last_hid  || now_step != last_step ||
+                now_kb   != last_kb) {
                 last_pads = now_pads;
                 last_dev  = now_dev;
                 last_hid  = now_hid;
                 last_step = now_step;
+                last_kb   = now_kb;
                 need_redraw = true;
             }
         }
@@ -481,7 +485,9 @@ bool menu_select_rom(char *out_path, size_t out_len) {
                 }
             }
 #else
-            if (pads > 0) {
+            const bool kb = usb_host_keyboard_connected();
+
+            if (pads > 0 || kb) {
 
 #if SHOW_HID_DEBUG
                 // Audio plumbing state, kept behind the debug switch:
@@ -496,8 +502,26 @@ bool menu_select_rom(char *out_path, size_t out_len) {
                          audio_hpvol_reg(),
                          (unsigned long)audio_buffers_sent());
 #else
-                snprintf(st, sizeof(st), "%d controller%s connected",
-                         pads, pads == 1 ? "" : "s");
+                // Name what is actually attached rather than just counting it.
+                // hid_app.cpp recognises most pads by VID/PID ("DS4", "X360",
+                // "MSNES", ...) and leaves "??" for the ones it does not, which
+                // is the difference between "my pad is unsupported" and "my pad
+                // is not plugged in".
+                {
+                    int o = 0;
+                    for (int i = 0; i < 2; i++) {
+                        const char *n = usb_host_pad_name(i);
+                        if (!n) continue;
+                        o += snprintf(st + o, sizeof(st) - o, "%sP%d %s",
+                                      o ? "  " : "", i + 1, n);
+                    }
+                    if (kb)
+                        o += snprintf(st + o, sizeof(st) - o, "%sKB",
+                                      o ? "  " : "");
+                    if (!o)
+                        snprintf(st, sizeof(st), "%d controller%s connected",
+                                 pads, pads == 1 ? "" : "s");
+                }
 #endif
                 status_col = COL_ACCENT;
             } else if (!usb_host_init_done()) {
@@ -510,7 +534,7 @@ bool menu_select_rom(char *out_path, size_t out_len) {
                 // Report the raw counts. dev counts everything including the
                 // CH334F hub, so dev=0 means a dead bus (power or PIO-USB),
                 // while dev>0 hid=0 means the hub is up but the pad is not.
-                snprintf(st, sizeof(st), "USB: %d device%s, %d HID, 0 pads",
+                snprintf(st, sizeof(st), "USB: %d device%s, %d HID, 0 pads, no KB",
                          dev, dev == 1 ? "" : "s", hid);
                 status_col = COL_ERROR;
             }

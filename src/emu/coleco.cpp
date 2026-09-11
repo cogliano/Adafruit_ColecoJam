@@ -117,22 +117,27 @@ static inline uint8_t read_controller(int port) {
     const CVController &p = cv_pad[port];
 
     if (!keypad_mode) {
-        // Joystick half: D0 up, D1 right, D2 down, D3 left, D6 right button.
+        // Joystick half: D0 up, D1 right, D2 down, D3 left, D6 left button.
         // Active low, D4/D5/D7 read high.
         uint8_t v = 0x7F;
         if (p.joy & CV_JOY_UP)    v &= (uint8_t)~0x01;
         if (p.joy & CV_JOY_RIGHT) v &= (uint8_t)~0x02;
         if (p.joy & CV_JOY_DOWN)  v &= (uint8_t)~0x04;
         if (p.joy & CV_JOY_LEFT)  v &= (uint8_t)~0x08;
-        if (p.joy & CV_BTN_RIGHT) v &= (uint8_t)~0x40;
+        if (p.joy & CV_BTN_LEFT)  v &= (uint8_t)~0x40;
         return (uint8_t)(v | 0x30);
     }
 
-    // Keypad half: D0-D3 key code, D6 left button.
+    // Keypad half: D0-D3 key code, D6 right button.
+    //
+    // The two action buttons used to be the other way round, which mirrored
+    // every left/right assignment in play. On the real controller the left
+    // button shares D6 with the joystick and the right one with the keypad;
+    // ares (cv/controller/gamepad) and SMS Plus (coleco_pio_r) agree.
     uint8_t v = 0x7F;
     if (p.keypad < 12) v = (uint8_t)((v & 0xF0) | keypad_code[p.keypad]);
     else               v = (uint8_t)((v & 0xF0) | 0x0F);
-    if (p.joy & CV_BTN_LEFT) v &= (uint8_t)~0x40;
+    if (p.joy & CV_BTN_RIGHT) v &= (uint8_t)~0x40;
     return (uint8_t)(v | 0x30);
 }
 

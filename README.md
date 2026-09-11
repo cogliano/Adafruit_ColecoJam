@@ -5,8 +5,8 @@ C++ against the Pico SDK and formatted for Visual Studio Code.
 
 Output goes to the Fruit Jam's HDMI/DVI port over HSTX, sound goes to the
 onboard TLV320DAC3100, games load from the microSD card (or straight off a real
-cartridge, if you have the reader shield), and control is via one or two
-SNES-layout USB gamepads.
+cartridge, if you have the reader shield), and control is via one or two USB
+gamepads, with an optional USB keyboard for the ColecoVision keypad.
 
 ---
 
@@ -69,6 +69,7 @@ default. Turn one on when something misbehaves:
 | `EMU_DEBUG_OVERLAY` | emulated Z80 and VDP state in the border below the picture: PC, SP, HL and the byte it points at, interrupt counters, the bytes at PC. |
 | `SHOW_CART_DEBUG` | cartridge probe bytes: bank 0 at four addresses, then each chip select. |
 | `SHOW_HID_DEBUG` | raw HID reports and the decoded button mask. |
+| `SERIAL_INPUT_LOG` | a serial console line for every keypad key and action button change during play, after all mapping. |
 | `AUDIO_TEST_TONE` | 440 Hz tone in place of emulator sound, to separate the audio path from the PSG. |
 | `AUDIO_CPU_FEED` | bypasses the audio DMA entirely. |
 
@@ -118,13 +119,18 @@ not been run on a board.** Expect to iterate on it. See
 Building the UF2 takes about two minutes:
 
 ```bash
-git clone -b 2.1.1 https://github.com/raspberrypi/pico-sdk
+git clone -b 2.3.0 https://github.com/raspberrypi/pico-sdk
 cd pico-sdk && git submodule update --init && export PICO_SDK_PATH=$PWD && cd ..
 
 cd Adafruit_ColecoJam
-./tools/fetch_deps.sh      # FatFs + Pico-PIO-USB
+./tools/fetch_deps.sh      # FatFs, Pico-PIO-USB, pico_hdmi, tusb_xinput
 ./tools/build.sh           # -> build/Adafruit_ColecoJam.uf2
 ```
+
+Use Pico SDK 2.3.0, the version `CMakeLists.txt` also selects for the VS Code
+extension. The XInput driver fetched into `third_party/tusb_xinput` is pinned to
+match that SDK's TinyUSB; an SDK carrying a newer TinyUSB fails to compile it
+(see the note in `tools/fetch_deps.sh`).
 
 Then hold **Button 1** while pressing **Reset** (or tapping the reset button) to
 mount `RP2350` as a USB drive, and drop `Adafruit_ColecoJam.uf2` onto it.
@@ -195,28 +201,88 @@ MODE" screen and stops browsing, so the two sides never write the FAT at once.
 
 ## Controls
 
-USB gamepads plug into the two **USB-A** ports. Player 1 is the first pad
-enumerated, player 2 the second. Mapping follows the
-[Adafruit SNES-layout controller](https://learn.adafruit.com/usb-game-controller-with-snes-like-layout):
+Controllers plug into the two **USB-A** ports. Player 1 is the first pad
+enumerated, player 2 the second.
 
-| Gamepad | ColecoVision |
-|---|---|
-| D-pad | Joystick |
-| Left shoulder | Left side action button |
-| Right shoulder | Right side action button |
-| Select | Keypad `*` |
-| Start | Keypad `#` |
-| A / B / X / Y | Keypad `1` / `2` / `3` / `4` |
-| Select + A / B / X / Y | Keypad `5` / `6` / `7` / `8` |
-| Start + A / B | Keypad `9` / `0` |
+### Supported controllers
+
+Report decoding is ported from the
+[pico-infonesPlus](https://github.com/fhoedemakers/pico-infonesPlus) family, so
+the same devices work here:
+
+- NES- and SNES-style pads with USB ID `081f:e401` (handled as a "MantaPad"),
+  such as the
+  [Adafruit SNES-layout controller](https://learn.adafruit.com/usb-game-controller-with-snes-like-layout)
+- Other USB HID gamepads, including the cheap clones that use the common
+  DirectInput report
+- DualShock 4, DualSense, PlayStation Classic
+- Sega Mega Drive / Genesis Mini, Retro-bit MD Arcade
+- XInput pads: Xbox 360 (wired and wireless), Xbox One, Series, original Xbox
+- USB keyboards
+
+The ROM browser names the pad it recognised (`DS4`, `X360`, `MSNES`, …), or `??`
+if it fell back to generic decoding.
+
+The NES- and SNES-style controllers share one USB identity, and
+ColecoJam treats both as the SNES-style controller. On the NES-style
+controller, **B** therefore acts as **X**: keypad `3`, or the left side action
+button while a keyboard is attached.
+
+NES and SNES controllers on the GPIO header, and the Wii Classic Controller over
+I2C, are not supported yet.
+
+### Gamepad
+
+| Gamepad | ColecoVision | With a keyboard attached |
+|---|---|---|
+| D-pad | Joystick | Joystick |
+| Left shoulder | Left side action button | Left side action button |
+| Right shoulder | Right side action button | Right side action button |
+| Select | Keypad `*` | Keypad `*` |
+| Start | Keypad `#` | Keypad `#` |
+| A / B | Keypad `1` / `2` | **Right / left side action button** |
+| X | Keypad `3` | **Left side action button** |
+| Y | Keypad `4` | — |
+| Select + A / B / X / Y | Keypad `5` / `6` / `7` / `8` | — |
+| Start + A / B | Keypad `9` / `0` | — |
 
 Combinations take priority: holding Select and pressing A sends `5`, not `*`
 then `1`. Select or Start on its own is what produces `*` or `#`.
 
-In the menu, D-pad browses (left/right page), **A** or **Start** loads. Board
-**Button 2** and **Button 3** also work if no pad is connected yet. Holding
-**Button 1** at any time leaves the emulator: back to the picker when this build
-was launched from the pico-bootLoader, otherwise into the UF2 bootloader.
+Attaching a keyboard makes the whole keypad directly reachable, so the pad stops
+standing in for it and becomes a plain ColecoVision controller — a joystick and
+two action buttons, which is all the original hardware had.
+
+On controllers labelled like an Xbox or PlayStation pad, the buttons follow the
+Nintendo position rather than the printed label: the right face button acts as
+**A** and the bottom one as **B**, as on the Adafruit controllers. With a
+keyboard attached, the right face button is therefore the right side action
+button and the bottom one the left.
+
+### Keyboard
+
+A keyboard never occupies a controller port. It merges into player 1, so a
+gamepad there keeps the joystick while the keyboard supplies the keypad.
+
+| Keyboard | ColecoVision |
+|---|---|
+| Arrow keys | Joystick |
+| `Z` / `X` | Left / right side action button |
+| `0`–`9` (number row or numeric keypad) | Keypad `0`–`9` |
+| `Shift`+`8`, numeric keypad `*` | Keypad `*` |
+| `Shift`+`3`, numeric keypad `/` | Keypad `#` |
+| `A` / `S` | Keypad `*` / `#` |
+
+Many cartridges read the keypad on their title screen to pick a game mode or a
+skill level, which is what the digits are for.
+
+### Menu
+
+D-pad or arrow keys browse (left/right page). **A** or **Start** on a pad loads
+the selected game; on a keyboard, `X`, `S` or **Enter** does. Board **Button 2**
+and **Button 3** also work if nothing is connected yet. Holding **Button 1** at
+any time leaves the emulator: back to the picker when this build was launched
+from the pico-bootLoader, otherwise into the UF2 bootloader.
 
 ---
 
@@ -327,12 +393,22 @@ are to need adjusting:
    target 44.1 kHz from a 32×fs BCLK with BCLK as the PLL input. If audio comes
    out at the wrong pitch, that's the block to revisit.
 
-5. **Gamepad report decoding.** `usb_host.cpp` decodes the common
-   DirectInput-style 8-byte HID report rather than parsing the report
-   descriptor. That covers the Adafruit controller and most cheap clones, but an
-   unusual pad may need its own case.
+5. **Gamepad report decoding.** `hid_app.cpp` recognises a list of controllers
+   by USB vendor and product ID — the Adafruit pads among them — and parses the
+   report descriptor for the rest, falling back to the common DirectInput-style
+   8-byte layout. That covers most cheap clones, but an unusual pad may still
+   need its own case. Set `SHOW_HID_DEBUG` in `include/config.h` to put the live raw
+   report in the menu footer, or read the serial console (below) to see what a
+   device enumerates as.
 
-6. **Megacart / bank-switched ROMs are not supported.** The bus implements the
+6. **Debug console.** `printf` output goes to UART1 at 115200 baud on **GPIO 8**
+   (TX) and **GPIO 9** (RX), the board default. The onboard ESP32-C6 shares those
+   pins, so the output may not be readable. `CMakeLists.txt` describes the
+   alternative, UART0 on GPIO 44/45 (the A4/A5 header pins), which works only
+   with the cartridge reader shield removed: those pins are also cartridge data
+   lines. The firmware prints its build and date at boot.
+
+7. **Megacart / bank-switched ROMs are not supported.** The bus implements the
    standard 32 KB cartridge window only. Anything larger than 32 KB is
    truncated.
 
@@ -350,6 +426,13 @@ Third-party components fetched by `tools/fetch_deps.sh`:
 - [FatFs](http://elm-chan.org/fsw/ff/) — ChaN, BSD-style licence
 - [Pico-PIO-USB](https://github.com/sekigon-gonnoc/Pico-PIO-USB) — MIT
 - [TinyUSB](https://github.com/hathach/tinyusb) — MIT (ships with the Pico SDK)
+- [pico_hdmi](https://github.com/fliperama86/pico_hdmi) — public domain (Unlicense)
+- [tusb_xinput](https://github.com/PicoPlus-devel/tusb_xinput) — MIT, Ryan Wendland
+
+The USB controller and keyboard decoding in `src/hw/hid_app.cpp` and
+`src/hw/gamepad.*` is ported from `pico_shared` in
+[pico-infonesPlus](https://github.com/fhoedemakers/pico-infonesPlus) (GPL-3.0),
+originally by Shuichi Takano.
 
 The HSTX video approach and the menu design follow
 [fhoedemakers' pico-snesPlus / pico-infonesPlus](https://github.com/fhoedemakers/pico-infonesPlus).

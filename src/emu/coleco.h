@@ -20,8 +20,8 @@ enum {
     CV_JOY_RIGHT  = 1 << 1,
     CV_JOY_DOWN   = 1 << 2,
     CV_JOY_LEFT   = 1 << 3,
-    CV_BTN_RIGHT  = 1 << 4,   // right side action button (fire)
-    CV_BTN_LEFT   = 1 << 5,   // left side action button
+    CV_BTN_RIGHT  = 1 << 4,   // right side action button, read with the keypad
+    CV_BTN_LEFT   = 1 << 5,   // left side action button, read with the joystick
 };
 
 // Keypad key indices. CV_KEY_NONE means nothing held.

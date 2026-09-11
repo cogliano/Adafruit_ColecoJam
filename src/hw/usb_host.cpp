@@ -1,10 +1,17 @@
-// usb_host.cpp -- TinyUSB host: SNES-layout USB gamepads on the Fruit Jam's
-// two USB-A ports (via the CH334F hub on the PIO-USB root port).
+// usb_host.cpp -- TinyUSB host bring-up, and the translation from normalised
+// controller state into ColecoVision controller state.
+//
+// Report decoding itself lives in hid_app.cpp (ported from pico-infonesPlus),
+// which handles USB HID gamepads -- generic DirectInput pads, DualShock 4,
+// DualSense, PlayStation Classic, Genesis Mini, Retro-bit MD Arcade, MantaPad
+// -- plus XInput pads (Xbox 360 / One / Series) and USB keyboards. This file
+// keeps the Fruit-Jam-specific half: powering the USB-A ports, configuring
+// PIO-USB, and mapping io::GamePadState / io::KeyboardState onto cv_pad[].
 //
 // Controller reference:
 //   https://learn.adafruit.com/usb-game-controller-with-snes-like-layout
 //
-// Button mapping to ColecoVision, per the project spec:
+// Gamepad mapping, no keyboard attached:
 //   D-pad ............................ joystick directions
 //   L / R shoulder ................... left / right side action buttons
 //   Select ........................... keypad *
@@ -13,13 +20,34 @@
 //   Select + A / B / X / Y ........... keypad 5 / 6 / 7 / 8
 //   Start  + A / B ................... keypad 9 / 0
 //
-// Note that the combination mappings take priority: holding Select and then
-// pressing A yields keypad 5, not * followed by 1. Select or Start alone (no
-// face button held) is what produces * or #.
+// The combination mappings take priority: holding Select and then pressing A
+// yields keypad 5, not * followed by 1. Select or Start alone (no face button
+// held) is what produces * or #.
+//
+// Gamepad mapping, keyboard attached:
+//   D-pad ............................ joystick directions
+//   B / X / L shoulder ............... left side action button
+//   A / R shoulder ................... right side action button
+//   Select / Start ................... keypad * / #
+//   Y and the chords ................. nothing
+//
+// A keyboard makes the whole keypad directly reachable, so the pad stops
+// standing in for it and becomes a plain ColecoVision controller: a joystick
+// and two action buttons, which is all the hardware ever had.
+//
+// Keyboard mapping (merged into port 1; the keyboard never takes a port):
+//   Arrow keys ....................... joystick directions
+//   Z / X ............................ left / right side action buttons
+//   0-9 (number row or numpad) ....... keypad 0-9
+//   Shift+8, numpad * ................ keypad *
+//   Shift+3, numpad / ................ keypad #
+//   A / S ............................ keypad * / # (Select / Start)
+//   Enter ............................ confirm, in the ROM browser
 //
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "usb_host.h"
+#include "gamepad.h"
 #include "config.h"
 #include "../emu/coleco.h"
 
@@ -29,65 +57,16 @@
 #include "hardware/dma.h"
 #include "hardware/pio.h"
 #include "pico/time.h"
+#include <stdio.h>
 #include <string.h>
 
-// ---------------------------------------------------------------------------
-// Generic HID gamepad state
-// ---------------------------------------------------------------------------
-struct PadState {
-    bool     connected;
-    uint8_t  dev_addr;
-    uint8_t  instance;
-    uint16_t buttons;       // normalised bitmask, see PAD_* below
+// Device-level attach counter. Distinct from the HID interface count: the Fruit
+// Jam's USB-A ports hang off a CH334F hub, so the hub itself is the first
+// device to enumerate. If dev_seen is 0 the bus is dead; if dev_seen is 1 and
+// no HID interface is up, the hub came up but the gamepad behind it did not.
+static int dev_seen = 0;
 
-    // Neutral baseline, captured from the first report after connection. The
-    // pad is assumed to be untouched at that moment, which is a safe bet since
-    // it happens milliseconds after enumeration.
-    //
-    // Needed because "centred" is not universal: idle axes are 0x80 on some
-    // pads and 0x00 on others, and the low nibble that holds the hat on some
-    // controllers is used for something else entirely on others -- where a
-    // resting value of 0 decodes as a permanently held UP.
-    bool     have_baseline;
-    uint8_t  base_x, base_y, base_hat;
-
-    // Last raw report, for on-screen diagnosis. 24 bytes because the buttons
-    // on at least one pad tested live past the first 8, and a truncated
-    // capture makes them look like they report nothing at all.
-    uint8_t  raw[24];
-    uint8_t  raw_len;
-    uint16_t report_len;    // true length, even if longer than raw[]
-};
-
-enum {
-    PAD_UP     = 1 << 0,
-    PAD_DOWN   = 1 << 1,
-    PAD_LEFT   = 1 << 2,
-    PAD_RIGHT  = 1 << 3,
-    PAD_A      = 1 << 4,
-    PAD_B      = 1 << 5,
-    PAD_X      = 1 << 6,
-    PAD_Y      = 1 << 7,
-    PAD_L      = 1 << 8,
-    PAD_R      = 1 << 9,
-    PAD_SELECT = 1 << 10,
-    PAD_START  = 1 << 11,
-};
-
-static PadState pads[MAX_PADS];
-
-// Counts every HID interface that has ever mounted, gamepad or not. Lets the
-// menu tell "nothing is enumerating at all" apart from "a device enumerated
-// but was not accepted as a gamepad" -- completely different problems.
-static int hid_seen = 0;
-
-// Device-level attach counter. Distinct from hid_seen: the Fruit Jam's USB-A
-// ports hang off a CH334F hub, so the hub itself is the first device to
-// enumerate. If dev_seen is 0 the bus is dead; if dev_seen is 1 and hid_seen
-// is 0, the hub came up but the gamepad behind it did not.
-static int dev_seen  = 0;
-
-// Total HID reports received, across all pads. Shown on screen so it is
+// Total HID reports received, across all devices. Shown on screen so it is
 // obvious whether a controller is sending anything at all -- a static hex dump
 // means either nothing is arriving or the display is not refreshing, and those
 // look identical without a counter.
@@ -98,6 +77,56 @@ static volatile bool host_init_done = false;
 // screen, so it publishes a step number that core 0 reads and displays. Any
 // of the calls below can block or panic, and panics on core 1 are silent.
 static volatile int init_step = 0;
+
+// ---------------------------------------------------------------------------
+// Raw report capture, for the SHOW_HID_DEBUG menu footer
+// ---------------------------------------------------------------------------
+// Slots are handed out in arrival order across all HID interfaces, so they do
+// NOT line up with player slots -- a keyboard occupies a capture slot but no
+// controller port. That is fine for a hex dump whose whole purpose is showing
+// what an unidentified device actually sends.
+//
+// 24 bytes because the buttons on at least one pad tested live past the first
+// 8, and a truncated capture makes them look like they report nothing at all.
+struct RawCapture {
+    bool     used;
+    uint8_t  dev_addr;
+    uint8_t  instance;
+    uint8_t  raw[24];
+    uint8_t  raw_len;
+    uint16_t report_len;    // true length, even if longer than raw[]
+};
+static RawCapture captures[MAX_PADS];
+
+void usb_host_note_report(unsigned char dev_addr, unsigned char instance,
+                          const uint8_t *report, unsigned short len) {
+    report_count++;
+
+    RawCapture *slot = nullptr;
+    for (int i = 0; i < MAX_PADS; i++) {
+        if (captures[i].used &&
+            captures[i].dev_addr == dev_addr && captures[i].instance == instance) {
+            slot = &captures[i];
+            break;
+        }
+    }
+    if (!slot) {
+        for (int i = 0; i < MAX_PADS; i++) {
+            if (!captures[i].used) {
+                captures[i].used     = true;
+                captures[i].dev_addr = dev_addr;
+                captures[i].instance = instance;
+                slot = &captures[i];
+                break;
+            }
+        }
+    }
+    if (!slot) return;
+
+    slot->report_len = len;
+    slot->raw_len = (uint8_t)(len < sizeof(slot->raw) ? len : sizeof(slot->raw));
+    memcpy(slot->raw, report, slot->raw_len);
+}
 
 // Blink the step number before each call, the same trick video_init() uses.
 // There is a working display by this point, but usb_host.cpp sits below the UI
@@ -125,162 +154,18 @@ static void hstage(int n) {
 // the right value depends on which video driver is built.
 
 // ---------------------------------------------------------------------------
-// Report decoding
-//
-// The Adafruit SNES-like controller enumerates as a generic HID gamepad with
-// an 8-byte report: two analog axes (which the D-pad drives to the extremes),
-// a hat, and a button bitfield. Rather than parse the report descriptor we
-// decode the common DirectInput-style layout, which covers this controller and
-// most of the cheap clones people already own.
+// TinyUSB device-level callbacks
 // ---------------------------------------------------------------------------
-// Byte offsets in the report, measured from a real Adafruit SNES-layout pad:
-//
-//   0  X axis      0x7F centre, 0x00 left,  0xFF right
-//   1  Y axis      0x7F centre, 0x00 up,    0xFF down
-//   2  Z axis      unused here
-//   3  Rz axis     unused here
-//   4  unused      rests at 0x80
-//   5  low nibble  hat switch, 0x0F = centred
-//      high nibble buttons 1-4: X 0x10, A 0x20, B 0x40, Y 0x80
-//   6  L 0x01, R 0x02, Select 0x10, Start 0x20
-//   7  unused
-//
-// This is the standard DirectInput arrangement. An earlier version read the
-// hat/button byte at offset 4 rather than 5, so no face or shoulder button was
-// ever seen -- the d-pad worked because it comes from the axes.
-enum {
-    RPT_X        = 0,
-    RPT_Y        = 1,
-    RPT_HAT_BTN  = 5,
-    RPT_BTN2     = 6,
-    RPT_MIN_LEN  = 7,
-};
-
-enum {                          // byte 5, high nibble
-    BIT_X = 0x10, BIT_A = 0x20, BIT_B = 0x40, BIT_Y = 0x80,
-};
-enum {                          // byte 6
-    BIT_L = 0x01, BIT_R = 0x02, BIT_SELECT = 0x10, BIT_START = 0x20,
-};
-
-static uint16_t decode_report(PadState *p, const uint8_t *report, uint16_t len) {
-    if (len < RPT_MIN_LEN) return 0;
-
-    const uint8_t x       = report[RPT_X];
-    const uint8_t y       = report[RPT_Y];
-    const uint8_t hat_btn = report[RPT_HAT_BTN];
-    const uint8_t btn2    = report[RPT_BTN2];
-
-    // First report after connection defines neutral, so a pad that idles its
-    // axes somewhere other than centre still reads correctly.
-    if (!p->have_baseline) {
-        p->base_x   = x;
-        p->base_y   = y;
-        p->base_hat = (uint8_t)(hat_btn & 0x0F);
-        p->have_baseline = true;
-    }
-
-    uint16_t b = 0;
-
-    // D-pad, as a deflection from this pad's own neutral. A digital pad slams
-    // the axis to an extreme, so a quarter of full scale is ample.
-    const int dx = (int)x - (int)p->base_x;
-    const int dy = (int)y - (int)p->base_y;
-    if (dx < -64) b |= PAD_LEFT;
-    if (dx >  64) b |= PAD_RIGHT;
-    if (dy < -64) b |= PAD_UP;
-    if (dy >  64) b |= PAD_DOWN;
-
-    // Hat, if this pad drives one. Anything matching the resting value counts
-    // as centred, whatever that value is.
-    const uint8_t hat = (uint8_t)(hat_btn & 0x0F);
-    if (hat != p->base_hat) {
-        switch (hat) {
-        case 0: b |= PAD_UP; break;
-        case 1: b |= PAD_UP | PAD_RIGHT; break;
-        case 2: b |= PAD_RIGHT; break;
-        case 3: b |= PAD_DOWN | PAD_RIGHT; break;
-        case 4: b |= PAD_DOWN; break;
-        case 5: b |= PAD_DOWN | PAD_LEFT; break;
-        case 6: b |= PAD_LEFT; break;
-        case 7: b |= PAD_UP | PAD_LEFT; break;
-        default: break;                      // 8 or 0x0F = centred
-        }
-    }
-
-    if (hat_btn & BIT_X) b |= PAD_X;
-    if (hat_btn & BIT_A) b |= PAD_A;
-    if (hat_btn & BIT_B) b |= PAD_B;
-    if (hat_btn & BIT_Y) b |= PAD_Y;
-
-    if (btn2 & BIT_L)      b |= PAD_L;
-    if (btn2 & BIT_R)      b |= PAD_R;
-    if (btn2 & BIT_SELECT) b |= PAD_SELECT;
-    if (btn2 & BIT_START)  b |= PAD_START;
-
-    return b;
-}
-
-// ---------------------------------------------------------------------------
-// TinyUSB HID callbacks
-// ---------------------------------------------------------------------------
-// Fires for every device, hub included.
+// The HID callbacks (tuh_hid_mount_cb and friends) live in hid_app.cpp.
+// These two fire for every device, hub included.
 void tuh_mount_cb(uint8_t dev_addr)   { (void)dev_addr; dev_seen++; }
-void tuh_umount_cb(uint8_t dev_addr)  { (void)dev_addr; if (dev_seen) dev_seen--; }
-
-void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance,
-                      uint8_t const *desc_report, uint16_t desc_len) {
-    (void)desc_report; (void)desc_len;
-
-    hid_seen++;
-
-    uint8_t proto = tuh_hid_interface_protocol(dev_addr, instance);
-    if (proto != HID_ITF_PROTOCOL_NONE) {
-        // Boot keyboard/mouse -- not a gamepad, but keep receiving so the
-        // device does not stall.
-        tuh_hid_receive_report(dev_addr, instance);
-        return;
-    }
-
+void tuh_umount_cb(uint8_t dev_addr)  {
+    if (dev_seen) dev_seen--;
     for (int i = 0; i < MAX_PADS; i++) {
-        if (!pads[i].connected) {
-            pads[i].connected     = true;
-            pads[i].dev_addr      = dev_addr;
-            pads[i].instance      = instance;
-            pads[i].buttons       = 0;
-            pads[i].have_baseline = false;   // recapture neutral on reconnect
-            pads[i].raw_len       = 0;
-            break;
+        if (captures[i].used && captures[i].dev_addr == dev_addr) {
+            captures[i].used = false;
         }
     }
-    tuh_hid_receive_report(dev_addr, instance);
-}
-
-void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
-    for (int i = 0; i < MAX_PADS; i++) {
-        if (pads[i].connected &&
-            pads[i].dev_addr == dev_addr && pads[i].instance == instance) {
-            pads[i].connected = false;
-            pads[i].buttons = 0;
-        }
-    }
-}
-
-void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance,
-                                uint8_t const *report, uint16_t len) {
-    for (int i = 0; i < MAX_PADS; i++) {
-        if (pads[i].connected &&
-            pads[i].dev_addr == dev_addr && pads[i].instance == instance) {
-            report_count++;
-            pads[i].report_len = len;
-            pads[i].raw_len = (uint8_t)(len < sizeof(pads[i].raw)
-                                        ? len : sizeof(pads[i].raw));
-            memcpy(pads[i].raw, report, pads[i].raw_len);
-            pads[i].buttons = decode_report(&pads[i], report, len);
-            break;
-        }
-    }
-    tuh_hid_receive_report(dev_addr, instance);
 }
 
 // ---------------------------------------------------------------------------
@@ -347,7 +232,7 @@ void usb_host_prepare(void) {
 }
 
 void usb_host_init(void) {
-    memset(pads, 0, sizeof(pads));
+    memset(captures, 0, sizeof(captures));
 #if !ENABLE_USB_HOST
     return;
 #else
@@ -378,80 +263,250 @@ void usb_host_task(void) {
 #endif
 }
 
-int  usb_host_hid_seen(void)    { return hid_seen; }
+// Live count of mounted HID interfaces, asked of TinyUSB rather than tracked
+// with a counter of our own -- hid_app.cpp owns the HID mount callbacks now,
+// and a count that cannot drift is the better diagnostic anyway.
+int usb_host_hid_seen(void) {
+#if ENABLE_USB_HOST
+    int n = 0;
+    for (uint8_t addr = 1; addr <= CFG_TUH_DEVICE_MAX; addr++) {
+        if (tuh_mounted(addr)) n += tuh_hid_instance_count(addr);
+    }
+    return n;
+#else
+    return 0;
+#endif
+}
+
 int  usb_host_dev_seen(void)    { return dev_seen; }
 bool usb_host_init_done(void)   { return host_init_done; }
 int  usb_host_init_step(void)   { return init_step; }
 
 int usb_host_raw_report(int index, uint8_t *dst, int max) {
-    if (index < 0 || index >= MAX_PADS || !pads[index].connected) return 0;
-    int n = pads[index].raw_len;
+    if (index < 0 || index >= MAX_PADS || !captures[index].used) return 0;
+    int n = captures[index].raw_len;
     if (n > max) n = max;
-    for (int i = 0; i < n; i++) dst[i] = pads[index].raw[i];
+    for (int i = 0; i < n; i++) dst[i] = captures[index].raw[i];
     return n;
 }
 
 uint32_t usb_host_report_count(void) { return report_count; }
 
 int usb_host_report_len(int index) {
-    if (index < 0 || index >= MAX_PADS || !pads[index].connected) return 0;
-    return (int)pads[index].report_len;
+    if (index < 0 || index >= MAX_PADS || !captures[index].used) return 0;
+    return (int)captures[index].report_len;
 }
 
 int usb_host_pad_count(void) {
     int n = 0;
-    for (int i = 0; i < MAX_PADS; i++) if (pads[i].connected) n++;
+    for (int i = 0; i < 2; i++)
+        if (io::getCurrentGamePadState(i).isConnected()) n++;
     return n;
 }
 
+bool usb_host_keyboard_connected(void) {
+    return io::getCurrentKeyboardState().connected;
+}
+
+const char *usb_host_pad_name(int index) {
+    if (index < 0 || index >= 2) return nullptr;
+    auto &gp = io::getCurrentGamePadState(index);
+    return gp.isConnected() ? gp.GamePadShortName : nullptr;
+}
+
+// ---------------------------------------------------------------------------
+// Normalised buttons -> menu bitmask
+// ---------------------------------------------------------------------------
+// The menu keeps its own MENU_* enum (usb_host.h) as a stable ABI, so
+// menu.cpp and wait_for_button_release() are unaffected by how the pad state
+// is produced. The keyboard is folded into port 0 so it can drive the browser.
 uint16_t usb_host_raw_buttons(int index) {
-    if (index < 0 || index >= MAX_PADS) return 0;
-    return pads[index].connected ? pads[index].buttons : 0;
+    if (index < 0 || index >= 2) return 0;
+
+    using Btn = io::GamePadState::Button;
+    const io::KeyboardState &kb = io::getCurrentKeyboardState();
+    auto &gp = io::getCurrentGamePadState(index);
+    uint32_t b = gp.isConnected() ? gp.buttons : 0;
+    if (index == 0) b |= kb.buttons;
+
+    uint16_t m = 0;
+
+    // Enter confirms in the browser, and only there -- it is deliberately kept
+    // out of KeyboardState::buttons so that pressing it mid-game does not also
+    // fire the left action button.
+    if (index == 0 && kb.connected) {
+        for (int i = 0; i < 6; i++) {
+            if (kb.keycode[i] == HID_KEY_ENTER ||
+                kb.keycode[i] == HID_KEY_KEYPAD_ENTER) {
+                m |= MENU_A;
+                break;
+            }
+        }
+    }
+    if (b & Btn::UP)     m |= MENU_UP;
+    if (b & Btn::DOWN)   m |= MENU_DOWN;
+    if (b & Btn::LEFT)   m |= MENU_LEFT;
+    if (b & Btn::RIGHT)  m |= MENU_RIGHT;
+    if (b & Btn::A)      m |= MENU_A;
+    if (b & Btn::B)      m |= MENU_B;
+    if (b & Btn::X)      m |= MENU_X;
+    if (b & Btn::Y)      m |= MENU_Y;
+    if (b & Btn::L)      m |= MENU_L;
+    if (b & Btn::R)      m |= MENU_R;
+    if (b & Btn::SELECT) m |= MENU_SELECT;
+    if (b & Btn::START)  m |= MENU_START;
+    return m;
+}
+
+// ---------------------------------------------------------------------------
+// Keyboard -> ColecoVision keypad
+// ---------------------------------------------------------------------------
+// cv_pad[].keypad is a single index, not a bitmask -- the real hardware could
+// only report one key at a time -- so this returns the first match found in the
+// six-slot HID rollover buffer.
+//
+// Shift matters: Shift+8 is '*' and Shift+3 is '#', so with Shift held those
+// two must NOT also read as digits.
+static uint8_t keyboard_keypad(void) {
+    const io::KeyboardState &kb = io::getCurrentKeyboardState();
+    if (!kb.connected) return CV_KEY_NONE;
+
+    const bool shift = (kb.modifier & (KEYBOARD_MODIFIER_LEFTSHIFT |
+                                       KEYBOARD_MODIFIER_RIGHTSHIFT)) != 0;
+
+    for (int i = 0; i < 6; i++) {
+        const uint8_t k = kb.keycode[i];
+        if (!k) continue;
+
+        switch (k) {
+        // '*' and '#' first, so Shift wins over the plain digit below.
+        case HID_KEY_8:              if (shift) return CV_KEY_STAR; break;
+        case HID_KEY_3:              if (shift) return CV_KEY_HASH; break;
+        case HID_KEY_KEYPAD_MULTIPLY: return CV_KEY_STAR;
+        case HID_KEY_KEYPAD_DIVIDE:   return CV_KEY_HASH;
+        default: break;
+        }
+        if (shift) continue;         // any other shifted key is not a digit
+
+        // HID_KEY_1..HID_KEY_9 are contiguous; 0 sits after 9, not before 1.
+        if (k >= HID_KEY_1 && k <= HID_KEY_9)
+            return (uint8_t)(CV_KEY_1 + (k - HID_KEY_1));
+        if (k == HID_KEY_0)
+            return CV_KEY_0;
+        if (k >= HID_KEY_KEYPAD_1 && k <= HID_KEY_KEYPAD_9)
+            return (uint8_t)(CV_KEY_1 + (k - HID_KEY_KEYPAD_1));
+        if (k == HID_KEY_KEYPAD_0)
+            return CV_KEY_0;
+    }
+    return CV_KEY_NONE;
 }
 
 // ---------------------------------------------------------------------------
 // Translate pad state into ColecoVision controller state
 // ---------------------------------------------------------------------------
-static void map_pad(uint16_t b, CVController *out) {
+static void map_pad(uint32_t b, bool kb_present, CVController *out) {
+    using Btn = io::GamePadState::Button;
+
     out->joy = 0;
     out->keypad = CV_KEY_NONE;
 
-    if (b & PAD_UP)    out->joy |= CV_JOY_UP;
-    if (b & PAD_DOWN)  out->joy |= CV_JOY_DOWN;
-    if (b & PAD_LEFT)  out->joy |= CV_JOY_LEFT;
-    if (b & PAD_RIGHT) out->joy |= CV_JOY_RIGHT;
+    if (b & Btn::UP)    out->joy |= CV_JOY_UP;
+    if (b & Btn::DOWN)  out->joy |= CV_JOY_DOWN;
+    if (b & Btn::LEFT)  out->joy |= CV_JOY_LEFT;
+    if (b & Btn::RIGHT) out->joy |= CV_JOY_RIGHT;
 
-    if (b & PAD_L) out->joy |= CV_BTN_LEFT;
-    if (b & PAD_R) out->joy |= CV_BTN_RIGHT;
+    if (b & Btn::L) out->joy |= CV_BTN_LEFT;
+    if (b & Btn::R) out->joy |= CV_BTN_RIGHT;
 
-    const bool sel   = (b & PAD_SELECT) != 0;
-    const bool start = (b & PAD_START)  != 0;
+    const bool sel   = (b & Btn::SELECT) != 0;
+    const bool start = (b & Btn::START)  != 0;
+
+    if (kb_present) {
+        // The keyboard owns the keypad, so the face buttons become the two
+        // action buttons the real controller had, doubling the shoulders --
+        // by position. A is the right-hand button on the Nintendo layout, so
+        // it is the right action button and B the left. Xbox and PlayStation
+        // pads follow, because hid_app.cpp maps them by position as well:
+        // Circle and Xbox B report as A, Cross and Xbox A as B.
+        if (b & Btn::A) out->joy |= CV_BTN_RIGHT;
+        if (b & Btn::B) out->joy |= CV_BTN_LEFT;
+
+        // X doubles as the left action button. The Adafruit NES-style pad
+        // runs in SNES mode (MANTAPAD_DEFAULT_MODE in CMakeLists.txt), where
+        // its B arrives as X; this keeps that B the left action button, as B
+        // is on every other pad. It has no shoulders to fall back on.
+        if (b & Btn::X) out->joy |= CV_BTN_LEFT;
+
+        if      (sel)   out->keypad = CV_KEY_STAR;
+        else if (start) out->keypad = CV_KEY_HASH;
+        return;
+    }
 
     if (sel) {
-        if      (b & PAD_A) out->keypad = CV_KEY_5;
-        else if (b & PAD_B) out->keypad = CV_KEY_6;
-        else if (b & PAD_X) out->keypad = CV_KEY_7;
-        else if (b & PAD_Y) out->keypad = CV_KEY_8;
-        else                out->keypad = CV_KEY_STAR;
+        if      (b & Btn::A) out->keypad = CV_KEY_5;
+        else if (b & Btn::B) out->keypad = CV_KEY_6;
+        else if (b & Btn::X) out->keypad = CV_KEY_7;
+        else if (b & Btn::Y) out->keypad = CV_KEY_8;
+        else                 out->keypad = CV_KEY_STAR;
     } else if (start) {
-        if      (b & PAD_A) out->keypad = CV_KEY_9;
-        else if (b & PAD_B) out->keypad = CV_KEY_0;
-        else                out->keypad = CV_KEY_HASH;
+        if      (b & Btn::A) out->keypad = CV_KEY_9;
+        else if (b & Btn::B) out->keypad = CV_KEY_0;
+        else                 out->keypad = CV_KEY_HASH;
     } else {
-        if      (b & PAD_A) out->keypad = CV_KEY_1;
-        else if (b & PAD_B) out->keypad = CV_KEY_2;
-        else if (b & PAD_X) out->keypad = CV_KEY_3;
-        else if (b & PAD_Y) out->keypad = CV_KEY_4;
+        if      (b & Btn::A) out->keypad = CV_KEY_1;
+        else if (b & Btn::B) out->keypad = CV_KEY_2;
+        else if (b & Btn::X) out->keypad = CV_KEY_3;
+        else if (b & Btn::Y) out->keypad = CV_KEY_4;
     }
 }
 
-void usb_host_update_coleco(void) {
+#if SERIAL_INPUT_LOG
+// One console line per change in a port's keypad key or action buttons, taken
+// after all mapping -- exactly what the emulated ColecoVision reads. Joystick
+// directions are left out on purpose: they change every few frames in play and
+// would bury the lines that matter.
+static void log_input_changes(void) {
+    static CVController last[2] = {{0, CV_KEY_NONE}, {0, CV_KEY_NONE}};
+    static const char key_char[] = "0123456789*#";
+    const uint8_t act_mask = CV_BTN_LEFT | CV_BTN_RIGHT;
+
     for (int i = 0; i < 2; i++) {
-        if (pads[i].connected) {
-            map_pad(pads[i].buttons, &cv_pad[i]);
-        } else {
-            cv_pad[i].joy = 0;
-            cv_pad[i].keypad = CV_KEY_NONE;
+        const CVController &now = cv_pad[i];
+        if (now.keypad == last[i].keypad &&
+            (now.joy & act_mask) == (last[i].joy & act_mask)) continue;
+
+        printf("P%d keypad %c  left %s  right %s\n", i + 1,
+               now.keypad < 12 ? key_char[now.keypad] : '-',
+               (now.joy & CV_BTN_LEFT)  ? "on" : "off",
+               (now.joy & CV_BTN_RIGHT) ? "on" : "off");
+        last[i] = now;
+    }
+}
+#endif
+
+void usb_host_update_coleco(void) {
+    const io::KeyboardState &kb = io::getCurrentKeyboardState();
+    const bool kb_present = kb.connected;
+
+    for (int i = 0; i < 2; i++) {
+        auto &gp = io::getCurrentGamePadState(i);
+        uint32_t b = gp.isConnected() ? gp.buttons : 0;
+
+        // The keyboard never takes a port of its own: it joins port 1, so a
+        // gamepad there keeps the joystick and gains two proper fire buttons.
+        if (i == 0) b |= kb.buttons;
+
+        map_pad(b, kb_present, &cv_pad[i]);
+
+        // A digit typed on the keyboard outranks the * / # the pad's Select
+        // and Start produce -- there is only one keypad register per port.
+        if (i == 0 && kb_present) {
+            const uint8_t k = keyboard_keypad();
+            if (k != CV_KEY_NONE) cv_pad[0].keypad = k;
         }
     }
+
+#if SERIAL_INPUT_LOG
+    log_input_changes();
+#endif
 }
