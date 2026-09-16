@@ -557,6 +557,11 @@ int main(void) {
 
     stdio_init_all();
 
+    // Console banner, printed before anything that can fail. If this never
+    // appears, the problem is the wiring or the UART setup, not something
+    // later in boot.
+    printf("\nAdafruit ColecoJam %s (%s %s)\n", ACJ_BUILD_ID, __DATE__, __TIME__);
+
     gpio_init(PIN_BUTTON1); gpio_set_dir(PIN_BUTTON1, GPIO_IN); gpio_pull_up(PIN_BUTTON1);
     gpio_init(PIN_BUTTON2); gpio_set_dir(PIN_BUTTON2, GPIO_IN); gpio_pull_up(PIN_BUTTON2);
     gpio_init(PIN_BUTTON3); gpio_set_dir(PIN_BUTTON3, GPIO_IN); gpio_pull_up(PIN_BUTTON3);
@@ -651,6 +656,7 @@ int main(void) {
     if (cart_present()) {
         menu_message("CARTRIDGE DETECTED", "Reading cartridge ROM...", nullptr, false);
         cart_len = cart_read(cart_rom, sizeof(cart_rom));
+        printf("Cartridge read: %lu bytes\n", (unsigned long)cart_len);
         if (cart_len >= 0x2000) {
             cv_load_rom(cart_rom, cart_len);
             cv_reset();
@@ -669,6 +675,10 @@ int main(void) {
         fatal(7, "No /coleco folder on the SD card.",
               "Create it and copy your .ROM files in.");
 
+    // The first line after the cartridge probe, which borrows the UART pins.
+    // A banner but no line here means the probe did not hand them back.
+    printf("ROM browser: %d ROM%s\n", n, n == 1 ? "" : "s");
+
     menu_message("ADAFRUIT COLECOJAM", "Starting cartridge browser...",
                  "If this sticks, USB host is hanging.", false);
 
@@ -684,6 +694,7 @@ int main(void) {
     cart_len = load_file(path, cart_rom, sizeof(cart_rom));
     if (cart_len == 0)
         fatal(8, "Could not read that ROM file.", path);
+    printf("Starting %s (%lu bytes)\n", path, (unsigned long)cart_len);
 
     cv_load_rom(cart_rom, cart_len);
     cv_reset();

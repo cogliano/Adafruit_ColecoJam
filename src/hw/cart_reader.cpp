@@ -32,6 +32,7 @@
 #include "pico/stdlib.h"
 #include "hardware/spi.h"
 #include "hardware/gpio.h"
+#include "hardware/uart.h"
 #include <string.h>
 
 // Data bus D0..D7 and chip selects for 0x8000 / 0xA000 / 0xC000.
@@ -137,6 +138,18 @@ static void cart_gpio_release(void) {
     gpio_set_function(PIN_I2C_SCL, GPIO_FUNC_I2C);
     gpio_pull_up(PIN_I2C_SDA);
     gpio_pull_up(PIN_I2C_SCL);
+
+    // Same for the debug console. cart_gpio_init() took every shield pin as
+    // plain GPIO, and the console's pins are shield pins too: GPIO 8/9 by
+    // default, 44/45 if moved (PICO_DEFAULT_UART_TX/RX_PIN in CMakeLists.txt).
+    // Without this, all serial output stops at the cartridge probe on every
+    // boot. The function select is chosen exactly as stdio_uart_init() does.
+#if defined(PICO_DEFAULT_UART_TX_PIN) && defined(PICO_DEFAULT_UART_RX_PIN)
+    gpio_set_function(PICO_DEFAULT_UART_TX_PIN,
+                      UART_FUNCSEL_NUM(uart_default, PICO_DEFAULT_UART_TX_PIN));
+    gpio_set_function(PICO_DEFAULT_UART_RX_PIN,
+                      UART_FUNCSEL_NUM(uart_default, PICO_DEFAULT_UART_RX_PIN));
+#endif
 
     pins_ready = false;
 }

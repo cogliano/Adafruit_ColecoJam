@@ -33,8 +33,23 @@ int      usb_host_init_step(void);
 int      usb_host_raw_report(int index, uint8_t *dst, int max);
 int      usb_host_report_len(int index);   // true report length in bytes
 uint32_t usb_host_report_count(void);      // total HID reports received
-uint16_t usb_host_raw_buttons(int index);   // raw PAD_* bitmask, for the menu
+uint16_t usb_host_raw_buttons(int index);   // MENU_* bitmask, for the menu
 void     usb_host_update_coleco(void);      // maps pads 0/1 into cv_pad[]
+
+// Is a USB keyboard attached? It never occupies a controller port: its keypad
+// digits, arrows and fire keys merge into port 1, so a gamepad stays player 1
+// and the keyboard supplies the 12-key ColecoVision keypad. This also changes
+// the pad mapping -- see map_pad() in usb_host.cpp.
+bool     usb_host_keyboard_connected(void);
+
+// Short name of the pad in a port ("DS4", "X360", "MSNES", ...), or nullptr.
+// Set by hid_app.cpp when it recognises the device.
+const char *usb_host_pad_name(int index);
+
+// Called by hid_app.cpp for every HID report received, before decoding, so the
+// SHOW_HID_DEBUG menu footer has real bytes to display. Not for general use.
+void     usb_host_note_report(unsigned char dev_addr, unsigned char instance,
+                              const uint8_t *report, unsigned short len);
 
 // Menu-facing button constants (must match usb_host.cpp).
 enum {

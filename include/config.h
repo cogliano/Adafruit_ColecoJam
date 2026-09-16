@@ -460,6 +460,14 @@
 
 #define SHOW_HID_DEBUG      0
 
+// Print one line on the serial console (115200 baud, on the pins set by
+// PICO_DEFAULT_UART_* in CMakeLists.txt) whenever a controller's keypad key
+// or action buttons change
+// during play -- after all mapping, so it is exactly what the emulated
+// ColecoVision sees. For checking pad and keyboard mappings without a game
+// that displays them. Each line can block for ~3 ms while the UART drains.
+#define SERIAL_INPUT_LOG    0
+
 // Build identifier, shown on the cartridge menu's title bar.
 //
 // Exists so "is the board actually running the code I just changed?" is

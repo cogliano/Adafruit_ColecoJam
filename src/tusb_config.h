@@ -77,13 +77,21 @@ extern "C" {
 // Host stack
 // ---------------------------------------------------------------------------
 #define CFG_TUH_HUB                  1        // the CH334F is a hub
-#define CFG_TUH_HID                  4        // up to 4 gamepads
+// HID interfaces, not devices. A single keyboard commonly exposes two or three
+// (boot keyboard, consumer controls, vendor page), so this has to be a good
+// deal larger than the number of things a user plugs in. It also bounds
+// hid_app.cpp's report-descriptor cache.
+#define CFG_TUH_HID                  8
 #define CFG_TUH_CDC                  0
 #define CFG_TUH_MSC                  0
 #define CFG_TUH_VENDOR               0
 
-// Root port + hub ports.
-#define CFG_TUH_DEVICE_MAX           (CFG_TUH_HUB + 3)
+// XInput pads (Xbox 360 / One / Series) speak a vendor protocol rather than
+// HID. hid_app.cpp hands the driver to TinyUSB via usbh_app_driver_get_cb().
+#define CFG_TUH_XINPUT               1
+
+// Root port + hub ports: the hub itself, plus a keyboard and two pads.
+#define CFG_TUH_DEVICE_MAX           (CFG_TUH_HUB + 4)
 #define CFG_TUSB_RHPORT0_MODE        (OPT_MODE_DEVICE | OPT_MODE_FULL_SPEED)
 #define CFG_TUH_ENUMERATION_BUFSIZE  256
 #define CFG_TUH_HID_EPIN_BUFSIZE     64

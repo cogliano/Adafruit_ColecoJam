@@ -3,6 +3,7 @@ build_bl_*/
 third_party/fatfs/
 third_party/Pico-PIO-USB/
 third_party/pico_hdmi/
+third_party/tusb_xinput/
 *.uf2
 *.elf
 *.bin
