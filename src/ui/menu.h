@@ -8,9 +8,10 @@
 // missing.
 int  menu_scan_roms(void);
 
-// Blocks until the user picks a ROM. Writes the full path (e.g.
-// "coleco/Donkey Kong.ROM") into out_path. Returns false only if the user
-// somehow leaves without choosing.
+// Blocks until the user picks a ROM, writing the full path (e.g.
+// "coleco/Donkey Kong.ROM") into out_path and returning true. Returns false if
+// the user held Button 1 for a second to leave ColecoJam altogether; the
+// caller then hands off to the bootloader.
 bool menu_select_rom(char *out_path, size_t out_len);
 
 void menu_message(const char *title, const char *line1, const char *line2,

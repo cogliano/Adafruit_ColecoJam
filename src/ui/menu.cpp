@@ -9,6 +9,7 @@
 
 #include "menu.h"
 #include "font8x8.h"
+#include "logo.h"
 #include "config.h"
 #include "../hw/video_hstx.h"
 #include "../hw/usb_host.h"
@@ -68,6 +69,20 @@ static void draw_char(int x, int y, char c, uint16_t fg, uint16_t bg,
         for (int col = 0; col < 8; col++) {
             if (bits & (0x80 >> col))      video_set_pixel(x + col, y + row, fg);
             else if (draw_bg)              video_set_pixel(x + col, y + row, bg);
+        }
+    }
+}
+
+// Copy the logo into the framebuffer at pixel position (x, y), clipped to the
+// screen. Straight RGB565 copy; the image carries its own black background.
+static void draw_logo(int x, int y) {
+    for (int r = 0; r < LOGO_H; r++) {
+        const int fy = y + r;
+        if (fy < 0 || fy >= FB_HEIGHT) continue;
+        for (int c = 0; c < LOGO_W; c++) {
+            const int fx = x + c;
+            if (fx < 0 || fx >= FB_WIDTH) continue;
+            video_set_pixel(fx, fy, logo_rgb565[r * LOGO_W + c]);
         }
     }
 }
@@ -162,14 +177,26 @@ static void draw_frame(int selected, int scroll, const char *status,
                        uint16_t status_col) {
     video_clear(COL_BG);
 
-    // Title bar
-    video_fill_rect(0, 0, FB_WIDTH, CHAR_H * 2, COL_TITLE_BG);
-    draw_text_centered(0, "SELECT GAME CARTRIDGE", COL_TITLE_FG, COL_TITLE_BG, false);
+    // Title band: the logo, left-aligned with the list header, and the build
+    // ID on the right. The band is LOGO_H tall -- three text rows -- so the
+    // header on row 3 sits directly beneath it.
+    //
+    // The band is black rather than the blue used elsewhere because the logo
+    // was drawn on black -- its bevels and the insides of its letters are all
+    // black-backed, so on any other colour it would sit in a black box.
+    video_fill_rect(0, 0, FB_WIDTH, LOGO_H, RGB565(0, 0, 0));
+    // Positioned so the logo's letters -- not the edge of the image, which has
+    // a column of black padding -- start at the same x as the "SELECT GAME
+    // CARTRIDGE" header, which is drawn at text column 1.
+    draw_logo(1 * CHAR_W - LOGO_INK_X, 0);
     {
-        // Title line carries the build ID so a stale flash is obvious.
-        char sub[48];
-        snprintf(sub, sizeof(sub), "Adafruit ColecoJam - %s", ACJ_BUILD_ID);
-        draw_text_centered(1, sub, COL_TITLE_FG, COL_TITLE_BG, false);
+        // The build ID stays on screen so a stale flash is obvious at a
+        // glance. Right-justified, and centred vertically in the 16-pixel band.
+        const char *b = ACJ_BUILD_ID;
+        const int x = FB_WIDTH - (int)strlen(b) * CHAR_W - 4;
+        const int y = (LOGO_H - CHAR_H) / 2;
+        for (int i = 0; b[i]; i++)
+            draw_char(x + i * CHAR_W, y, b[i], COL_DIM, RGB565(0, 0, 0), false);
     }
 
     if (roms.count == 0) {
@@ -206,7 +233,7 @@ static void draw_frame(int selected, int scroll, const char *status,
         char pos[24];
         snprintf(pos, sizeof(pos), "%d / %d", selected + 1, roms.count);
         draw_text(COLS - (int)strlen(pos) - 1, 3, pos, COL_DIM, COL_BG, false);
-        draw_text(1, 3, "CARTRIDGES", COL_ACCENT, COL_BG, false);
+        draw_text(1, 3, "SELECT GAME CARTRIDGE", COL_ACCENT, COL_BG, false);
     }
 
     // Footer
@@ -302,8 +329,15 @@ static bool edge_or_repeat(Repeat *r, uint16_t now, uint16_t mask) {
 // Main loop
 // ---------------------------------------------------------------------------
 bool menu_select_rom(char *out_path, size_t out_len) {
-    int selected = 0;
-    int scroll   = 0;
+    // Remembered across calls, so returning from a game with Button 1 lands on
+    // the cartridge you were just playing rather than the top of the list.
+    // Clamped because the list is rescanned each time and may have shrunk.
+    static int selected = 0;
+    static int scroll   = 0;
+    if (selected >= roms.count) selected = roms.count > 0 ? roms.count - 1 : 0;
+    if (scroll > selected)      scroll   = selected;
+    if (selected >= scroll + LIST_ROWS) scroll = selected - LIST_ROWS + 1;
+    if (scroll < 0)             scroll   = 0;
     Repeat rpt = { 0, get_absolute_time(), 0 };
 
     const char *status = nullptr;
@@ -416,6 +450,29 @@ bool menu_select_rom(char *out_path, size_t out_len) {
         // Board buttons work too, in case no pad is plugged in yet.
         if (!gpio_get(PIN_BUTTON2)) now |= MENU_DOWN;
         if (!gpio_get(PIN_BUTTON3)) now |= MENU_A;
+
+        // Button 1 HELD for a second: leave ColecoJam altogether. Returns false,
+        // and main() hands off to coleco_exit() -- the pico-bootLoader picker
+        // when we were launched from it, otherwise the UF2 bootloader.
+        //
+        // This lives here rather than in the emulator because a PRESS of
+        // Button 1 during a game now means "back to this menu". Measured from
+        // the start of each press, so a press left over from leaving a game
+        // (main waits for release first anyway) can never count towards it.
+        {
+            static absolute_time_t b1_down;
+            static bool            b1_held = false;
+            if (!gpio_get(PIN_BUTTON1)) {
+                if (!b1_held) { b1_held = true; b1_down = get_absolute_time(); }
+                else if (absolute_time_diff_us(b1_down, get_absolute_time())
+                         >= 1000000) {
+                    b1_held = false;
+                    return false;
+                }
+            } else {
+                b1_held = false;
+            }
+        }
 
         if (roms.count > 0) {
             if (edge_or_repeat(&rpt, now, MENU_UP)) {
