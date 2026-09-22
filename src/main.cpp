@@ -227,8 +227,8 @@ static bool wait_for_msc_request(void) {
     }
     gpio_put(PIN_LED, 1);
 
-    // Wait for release, so the press cannot also trigger the bootloader
-    // shortcut in run_emulator() a moment later.
+    // Wait for release, so a press that runs long cannot carry over into the
+    // menu -- where holding Button 1 now means "leave ColecoJam".
     if (requested) {
         absolute_time_t rel = make_timeout_time_ms(3000);
         while (!gpio_get(PIN_BUTTON1) && !time_reached(rel)) sleep_ms(10);
@@ -357,8 +357,17 @@ static uint32_t load_file(const char *path, uint8_t *dst, uint32_t max_len) {
 // ---------------------------------------------------------------------------
 // Emulator loop
 // ---------------------------------------------------------------------------
-[[noreturn]] static void run_emulator(void) {
+// Runs the loaded cartridge until Button 1 is pressed, then returns so the
+// caller can show the cartridge menu again.
+static void run_emulator(void) {
     uint16_t *fb = video_framebuffer();
+
+#if AUDIO_SINK == AUDIO_SINK_HDMI
+    // Samples carried over between frames. Cleared on every entry, or the tail
+    // of the previous game's sound plays at the start of the next one.
+    static int16_t pend_buf[AUDIO_BUF_SAMPLES];
+    int            pend_len = 0;
+#endif
 
     // The ColecoVision image is 256x192 centred in the 320x240 framebuffer.
     // Draw the border once; the emulator only ever touches the inner region.
@@ -397,9 +406,6 @@ static uint32_t load_file(const char *path, uint8_t *dst, uint32_t max_len) {
         // the emulator; the queue is deep enough to ride out an occasional
         // short fill.
         {
-            static int16_t pend_buf[AUDIO_BUF_SAMPLES];
-            static int     pend_len = 0;
-
             for (int guard = 0; guard < 8; guard++) {
                 if (hdmi_audio_queue_level() >= HDMI_AUDIO_QUEUE_TARGET) break;
 
@@ -419,17 +425,13 @@ static uint32_t load_file(const char *path, uint8_t *dst, uint32_t max_len) {
         }
 #endif
 
-        // Button 1 leaves the emulator -- back to the pico-bootLoader picker
-        // when we were launched from it, otherwise to the UF2 bootloader so new
-        // firmware can be flashed without the BOOTSEL/reset dance. It must be
-        // HELD for a second: the same button also requests USB drive mode at
-        // boot, and a momentary read would turn that press into a surprise
-        // reboot.
-        if (!gpio_get(PIN_BUTTON1)) {
-            int held = 0;
-            while (!gpio_get(PIN_BUTTON1) && held < 100) { sleep_ms(10); held++; }
-            if (held >= 100) coleco_exit();
-        }
+        // Button 1: leave the game and return to the cartridge menu, at once.
+        //
+        // Leaving ColecoJam entirely -- coleco_exit(), back to the
+        // pico-bootLoader picker or the UF2 bootloader -- is now a one-second
+        // HOLD of Button 1 in the menu instead. Two presses from a game: tap
+        // to reach the menu, hold to leave.
+        if (!gpio_get(PIN_BUTTON1)) break;
 
 #if EMU_DEBUG_OVERLAY
         // Emulated CPU state, refreshed a few times a second in the border
@@ -528,6 +530,23 @@ static uint32_t load_file(const char *path, uint8_t *dst, uint32_t max_len) {
         // far better than tearing.
         video_wait_vsync();
     }
+
+    // --- Leaving the game ------------------------------------------------
+    // Silence the sound chip. With the codec sink, core 1 keeps rendering the
+    // PSG regardless of what core 0 is doing, so the last notes of the game
+    // would otherwise drone on under the menu indefinitely.
+    psg_reset();
+
+    // Wait for the button to come up, so one press is exactly one action --
+    // and so it cannot start counting towards the menu's hold-to-exit. Same
+    // 2-second guard as the launch press, so a stuck button cannot hang this.
+    absolute_time_t deadline = make_timeout_time_ms(2000);
+    while (!gpio_get(PIN_BUTTON1) && !time_reached(deadline)) sleep_ms(5);
+    sleep_ms(30);                   // debounce
+
+    // The LED heartbeat may have been left lit mid-toggle.
+    gpio_put(PIN_LED, 1);
+    printf("Returned to menu\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -661,42 +680,58 @@ int main(void) {
             cv_load_rom(cart_rom, cart_len);
             cv_reset();
             run_emulator();
+            // Button 1 pressed during the cartridge game: carry on into the
+            // browser below, so SD games are reachable without pulling the
+            // cartridge and resetting.
         }
         // Fall through to the browser if the read came back short.
     }
 #endif
 
     // --- ROM browser -----------------------------------------------------
-    // Each stage updates the screen, so if it stops the last message on the
-    // display names the exact step rather than leaving an earlier one frozen.
-    menu_message("ADAFRUIT COLECOJAM", "Scanning /coleco for ROMs...", nullptr, false);
-    int n = menu_scan_roms();
-    if (n < 0)
-        fatal(7, "No /coleco folder on the SD card.",
-              "Create it and copy your .ROM files in.");
+    // Browse, load, play -- and back round again whenever Button 1 is pressed
+    // in a game. The SD card stays mounted and the BIOS stays loaded, so the
+    // return is instant rather than a reboot. Each stage updates the screen,
+    // so if one stops the message on the display names the exact step.
+    for (;;) {
+        // Rescanned every time: files may have been added over USB since.
+        menu_message("ADAFRUIT COLECOJAM", "Scanning /coleco for ROMs...", nullptr, false);
+        int n = menu_scan_roms();
+        if (n < 0)
+            fatal(7, "No /coleco folder on the SD card.",
+                  "Create it and copy your .ROM files in.");
 
-    // The first line after the cartridge probe, which borrows the UART pins.
-    // A banner but no line here means the probe did not hand them back.
-    printf("ROM browser: %d ROM%s\n", n, n == 1 ? "" : "s");
+        // The first line after the cartridge probe, which borrows the UART
+        // pins. A banner but no line here means the probe did not hand them
+        // back.
+        printf("ROM browser: %d ROM%s\n", n, n == 1 ? "" : "s");
 
-    menu_message("ADAFRUIT COLECOJAM", "Starting cartridge browser...",
-                 "If this sticks, USB host is hanging.", false);
+        menu_message("ADAFRUIT COLECOJAM", "Starting cartridge browser...",
+                     "If this sticks, USB host is hanging.", false);
 
-    char path[MAX_FILENAME_LEN + 16];
-    if (!menu_select_rom(path, sizeof(path)))
-        fatal(8, "No cartridge selected.", nullptr);
+        char path[MAX_FILENAME_LEN + 16];
+        if (!menu_select_rom(path, sizeof(path))) {
+            // Button 1 held in the menu: leave ColecoJam -- to the
+            // pico-bootLoader picker, or the UF2 bootloader when standalone.
+            printf("Exit requested from menu\n");
+            coleco_exit();
+        }
 
-    // Let go of the launch press before the machine starts, so it is not
-    // delivered to the game as a keypad digit.
-    wait_for_button_release();
+        // Let go of the launch press before the machine starts, so it is not
+        // delivered to the game as a keypad digit.
+        wait_for_button_release();
 
-    menu_message("LOADING", path, nullptr, false);
-    cart_len = load_file(path, cart_rom, sizeof(cart_rom));
-    if (cart_len == 0)
-        fatal(8, "Could not read that ROM file.", path);
-    printf("Starting %s (%lu bytes)\n", path, (unsigned long)cart_len);
+        menu_message("LOADING", path, nullptr, false);
+        cart_len = load_file(path, cart_rom, sizeof(cart_rom));
+        if (cart_len == 0)
+            fatal(8, "Could not read that ROM file.", path);
+        printf("Starting %s (%lu bytes)\n", path, (unsigned long)cart_len);
 
-    cv_load_rom(cart_rom, cart_len);
-    cv_reset();
-    run_emulator();
+        // cv_reset() clears RAM, the VDP, the PSG and the CPU, so the new game
+        // starts exactly as it would from power-on -- nothing carries across
+        // from the previous one.
+        cv_load_rom(cart_rom, cart_len);
+        cv_reset();
+        run_emulator();
+    }
 }

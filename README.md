@@ -164,9 +164,9 @@ bootloader's SD card and let the picker flash it:
    ```
    Artwork (`col.png`) already ships with the bootloader.
 
-Holding **Button 1** then returns to the picker rather than to the UF2
-bootloader. The standalone build above is unaffected and still behaves as
-documented.
+Holding **Button 1** in the cartridge menu then returns to the picker rather
+than to the UF2 bootloader. The standalone build above is unaffected and still
+behaves as documented.
 
 The build tree is kept separate from `build/` so the two variants never share
 stale objects. See `cmake/BootPartition.cmake` for the flash map and for why
@@ -280,9 +280,27 @@ skill level, which is what the digits are for.
 
 D-pad or arrow keys browse (left/right page). **A** or **Start** on a pad loads
 the selected game; on a keyboard, `X`, `S` or **Enter** does. Board **Button 2**
-and **Button 3** also work if nothing is connected yet. Holding **Button 1** at
-any time leaves the emulator: back to the picker when this build was launched
-from the pico-bootLoader, otherwise into the UF2 bootloader.
+and **Button 3** also work if nothing is connected yet. The list reopens on the
+game you were last playing.
+
+### Button 1
+
+| Where | Action | Result |
+|---|---|---|
+| During a game | **press** | back to the cartridge menu, immediately |
+| In the menu | **hold 1 s** | leave ColecoJam: back to the picker when launched from the pico-bootLoader, otherwise into the UF2 bootloader |
+| On an error screen | **hold** | same as holding it in the menu |
+| At power-on | press within 2 s | mount the SD card as a USB drive |
+
+Returning to the menu keeps the SD card mounted and the BIOS loaded, so it is
+instant rather than a reboot, and the sound chip is silenced on the way out.
+Pressing Button 1 during a game from the cartridge shield also lands in the SD
+menu.
+
+So leaving ColecoJam from a game is two steps: tap Button 1 to reach the menu,
+then hold it. Earlier builds went straight to the picker on a one-second hold
+during play; that hold now belongs to the menu, because a press in a game is
+the quick way back to the list.
 
 ---
 
