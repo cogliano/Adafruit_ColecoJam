@@ -47,6 +47,73 @@
 #include "xinput_host.h"
 #include "gamepad.h"
 #include "usb_host.h"
+
+// ColecoJam (f): re-arm failed report requests.
+//
+// Upstream calls tuh_hid_receive_report() after handling each report and, if
+// it fails, prints a message and gives up. That request is the only thing that
+// keeps reports coming, so a single failure leaves the pad permanently silent
+// until it is physically unplugged and reconnected -- which is exactly what
+// was observed after the menu screen saver had been running a while.
+//
+// A failure here is usually transient (the endpoint is momentarily busy, or a
+// transfer was still in flight), so the fix is to remember the interface and
+// try again from the host task rather than to treat it as fatal.
+namespace {
+
+struct RearmSlot { uint8_t addr; uint8_t instance; bool pending; };
+RearmSlot rearm_slots[16];
+
+void rearm_remember(uint8_t dev_addr, uint8_t instance) {
+    for (auto &r : rearm_slots)                 // already queued?
+        if (r.pending && r.addr == dev_addr && r.instance == instance) return;
+    for (auto &r : rearm_slots)
+        if (!r.pending) { r.addr = dev_addr; r.instance = instance;
+                          r.pending = true; return; }
+    // Table full: drop it. Sixteen simultaneously failing interfaces is far
+    // beyond anything this hardware supports, and losing one retry is better
+    // than growing the table without bound.
+}
+
+void rearm_forget(uint8_t dev_addr, uint8_t instance) {
+    for (auto &r : rearm_slots)
+        if (r.pending && r.addr == dev_addr && r.instance == instance)
+            r.pending = false;
+}
+
+} // namespace
+
+// Request the next report, remembering the interface if the request fails.
+static bool hid_request_report(uint8_t dev_addr, uint8_t instance) {
+    if (tuh_hid_receive_report(dev_addr, instance)) {
+        rearm_forget(dev_addr, instance);
+        return true;
+    }
+    rearm_remember(dev_addr, instance);
+    return false;
+}
+
+// Defined further down, where the player-slot table is in scope.
+static void hid_reap_stale_players(void);
+
+// Retry any request that failed earlier. Called from usb_host_task(), so it
+// runs at whatever rate the host stack is being serviced.
+// Declared in usb_host.h, which every caller here already includes. Plain C++
+// linkage to match that declaration -- an extern "C" definition against a C++
+// declaration is a link error.
+void hid_app_retry_pending(void) {
+    for (auto &r : rearm_slots) {
+        if (!r.pending) continue;
+        if (!tuh_hid_mounted(r.addr, r.instance)) {
+            r.pending = false;                  // device went away
+            continue;
+        }
+        if (tuh_hid_receive_report(r.addr, r.instance)) r.pending = false;
+    }
+
+    hid_reap_stale_players();
+}
+
 #ifndef ABSWAPPED
 #define ABSWAPPED 1
 #endif
@@ -713,7 +780,7 @@ extern "C"
             kbDevAddr = dev_addr;
             kbInstance = instance;
             io::keyboardState().connected = true;
-            if (!tuh_hid_receive_report(dev_addr, instance))
+            if (!hid_request_report(dev_addr, instance))
             {
                 printf("Error: cannot request to receive report\r\n");
             }
@@ -729,7 +796,7 @@ extern "C"
             mouseDevAddr = dev_addr;
             mouseInstance = instance;
             io::getCurrentMouseState().connected = true;
-            if (!tuh_hid_receive_report(dev_addr, instance))
+            if (!hid_request_report(dev_addr, instance))
             {
                 printf("Error: cannot request to receive report\r\n");
             }
@@ -825,9 +892,42 @@ extern "C"
             printf("No free report-descriptor cache slot for device %d instance %d\n", dev_addr, instance);
         }
 
-        if (!tuh_hid_receive_report(dev_addr, instance))
+        if (!hid_request_report(dev_addr, instance))
         {
             printf("Error: cannot request to receive report\r\n");
+        }
+    }
+
+    // ColecoJam (g): release player slots whose device is no longer on the bus.
+    //
+    // Slots are keyed on the USB device address. If a controller drops off and
+    // comes back, TinyUSB gives it the next free address, and unless the
+    // unmount callback fired for the old one its slot stays allocated forever.
+    // The pad then mounts as player 2 while a dead player 1 holds the port it
+    // was using -- which showed on screen as "P1 MSNES P2 MSNES" with only one
+    // controller plugged in, and the pad unresponsive because the game was
+    // still reading the slot that no longer has a device behind it.
+    //
+    // Unmount callbacks can be missed when a device disappears through an
+    // error rather than a clean disconnect, so this does not rely on them: it
+    // asks TinyUSB directly whether each remembered address is still mounted.
+    // Called from usb_host_task() via hid_app_retry_pending().
+    static void reapStalePlayers(void)
+    {
+        for (int i = 0; i < MAX_USB_PLAYERS; i++)
+        {
+            const uint8_t addr = playerDevAddr[i];
+            if (addr == 0) continue;
+            if (tuh_mounted(addr)) continue;
+
+            printf("Reaping stale player %d (device address %d is gone)\n",
+                   i + 1, addr);
+            auto &gp = io::getCurrentGamePadState(i);
+            gp.flagConnected(false);
+            gp.GamePadName = nullptr;
+            gp.GamePadShortName = nullptr;
+            gp.buttons = 0;
+            playerDevAddr[i] = 0;
         }
     }
 
@@ -885,7 +985,7 @@ extern "C"
             {
                 processKeyboardReport(reinterpret_cast<hid_keyboard_report_t const *>(report));
             }
-            if (!tuh_hid_receive_report(dev_addr, instance))
+            if (!hid_request_report(dev_addr, instance))
             {
                 printf("Error: cannot request to receive report\r\n");
             }
@@ -900,7 +1000,7 @@ extern "C"
             {
                 processMouseReport(reinterpret_cast<hid_mouse_report_t const *>(report), len);
             }
-            if (!tuh_hid_receive_report(dev_addr, instance))
+            if (!hid_request_report(dev_addr, instance))
             {
                 printf("Error: cannot request to receive report\r\n");
             }
@@ -909,7 +1009,7 @@ extern "C"
         int player = getPlayerIndex(dev_addr);
         if (player < 0)
         {
-            tuh_hid_receive_report(dev_addr, instance);
+            hid_request_report(dev_addr, instance);
             return;
         }
 
@@ -1242,7 +1342,7 @@ extern "C"
             if (rpt_count == 0 || rpt_info_arr == nullptr)
             {
                 processDirectInputReport(player, report, len);
-                if (!tuh_hid_receive_report(dev_addr, instance))
+                if (!hid_request_report(dev_addr, instance))
                 {
                     printf("Error: cannot request to receive report\r\n");
                 }
@@ -1370,7 +1470,7 @@ extern "C"
             }
         }
 
-        if (!tuh_hid_receive_report(dev_addr, instance))
+        if (!hid_request_report(dev_addr, instance))
         {
             printf("Error: cannot request to receive report\r\n");
         }
@@ -1409,7 +1509,9 @@ extern "C"
     void tuh_xinput_report_received_cb(uint8_t dev_addr, uint8_t instance, xinputh_interface_t const *xid_itf, uint16_t len)
     {
         const xinput_gamepad_t *p = &xid_itf->pad;
-        const char *type_str;
+        // The report length is not needed: xinputh_interface_t already carries
+        // the decoded pad state, so the raw byte count is redundant here.
+        (void)len;
         int player = getPlayerIndex(dev_addr);
         if (player < 0)
         {
@@ -1420,6 +1522,10 @@ extern "C"
         if (xid_itf->last_xfer_result == XFER_RESULT_SUCCESS)
         {
 #if 0
+            // Declared inside the disabled block: its only uses are here, and
+            // leaving it outside made it an unused variable whenever this
+            // debug printing is off, which is always.
+            const char *type_str;
             switch (xid_itf->type)
             {
             case 1:
@@ -1552,3 +1658,11 @@ extern "C"
 #ifdef __cplusplus
 }
 #endif
+
+// Bridge for the prototype declared at the top of this file.
+//
+// Deliberately OUTSIDE the extern "C" block above. The prototype has C++
+// linkage, so defining this inside that block would give it C linkage and the
+// two would not link. reapStalePlayers() is a file-scope static, so it stays
+// visible here even though it sits inside the block.
+static void hid_reap_stale_players(void) { reapStalePlayers(); }

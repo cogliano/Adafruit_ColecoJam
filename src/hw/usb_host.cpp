@@ -260,6 +260,12 @@ void usb_host_init(void) {
 void usb_host_task(void) {
 #if ENABLE_USB_HOST
     tuh_task();
+
+    // Retry any HID report request that failed earlier. Without this a single
+    // transient failure silences a controller until it is physically
+    // unplugged, because the request for the next report is the only thing
+    // keeping reports flowing. See hid_app.cpp, note (f).
+    hid_app_retry_pending();
 #endif
 }
 

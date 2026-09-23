@@ -456,6 +456,28 @@
 // disabled, or a stack that has wandered out of the 1 KB of RAM.
 #define EMU_DEBUG_OVERLAY   0
 
+// ---------------------------------------------------------------------------
+// Menu screen saver: the logo bounces around the screen after a period with no
+// controller or button input. Any input restores the menu, and the press that
+// wakes it is swallowed rather than acting on the list.
+// ---------------------------------------------------------------------------
+
+// Idle time before it starts, in seconds. 0 disables it entirely.
+#define MENU_SAVER_TIMEOUT_S  120
+//#define MENU_SAVER_TIMEOUT_S  10
+
+// When the saver starts, the menu fades to black around the logo over this
+// many milliseconds, and then everything holds still for the pause below
+// before the logo begins to move. Either may be 0 to skip that stage.
+#define MENU_SAVER_FADE_MS    1000
+#define MENU_SAVER_PAUSE_MS   500
+
+// Seconds for the logo to travel from the top of the screen to the bottom.
+// Smaller is faster. The horizontal speed is the same in pixels per second, so
+// the logo moves at 45 degrees and the two axes drift in and out of phase
+// instead of retracing one path.
+#define MENU_SAVER_BOUNCE_S   10
+
 #define SHOW_CART_DEBUG     0
 
 #define SHOW_HID_DEBUG      0
@@ -475,7 +497,7 @@
 // perfectly matched an older decoder, and it took a full round of analysis to
 // realise the source and the firmware had diverged. Bump this whenever you
 // change something you intend to test.
-#define ACJ_BUILD_ID        "version 1.4"
+#define ACJ_BUILD_ID        "version 1.5"
 
 
 // ---------------------------------------------------------------------------

@@ -283,6 +283,58 @@ the selected game; on a keyboard, `X`, `S` or **Enter** does. Board **Button 2**
 and **Button 3** also work if nothing is connected yet. The list reopens on the
 game you were last playing.
 
+### Screen saver
+
+After a period with no input the menu gives way to the logo bouncing around the
+screen. Any pad direction, face button or board button restores the list, and
+the press that wakes it is swallowed so it cannot also move the cursor or start
+a game. Two settings in `include/config.h`:
+
+```c
+#define MENU_SAVER_TIMEOUT_S  120   // idle seconds before it starts; 0 disables
+#define MENU_SAVER_FADE_MS    500   // menu fades away around the logo
+#define MENU_SAVER_PAUSE_MS   500   // then everything holds still
+#define MENU_SAVER_BOUNCE_S   5     // seconds from the top of the screen to the bottom
+```
+
+It runs in three stages: the menu fades to black around the logo, which stays
+put; everything holds still for the pause; then the logo sets off from exactly
+where it was. Either time may be 0 to skip that stage.
+
+The fade scales the framebuffer in place, since there is no room for a second
+150 KB copy to fade from. To land on `original * (1 - i/N)` at step `i`, given
+the buffer already holds `original * (1 - (i-1)/N)`, each step multiplies by
+`(N-i)/(N-i+1)` -- exact, and reaching zero on the final step. Rows are split
+around the logo so it is never touched.
+
+The horizontal speed matches the vertical one in pixels per second, so the logo
+travels at 45 degrees and the two axes drift in and out of phase rather than
+retracing a single path. Position comes from the clock rather than a per-frame
+step, so the speed does not depend on how busy the menu loop is.
+
+The bounce begins at the logo's position on the menu, so the changeover looks
+like the list and header falling away from around it rather than the logo
+jumping to a corner. Each frame draws the logo at its new position first and
+then paints out only the sliver it has left behind, so the framebuffer never
+holds a frame without it. Redraws are paced to the vertical blank, and the USB stacks keep being
+serviced while waiting for it.
+
+### If a controller stops responding
+
+Two safeguards run from the USB host task, both added after this was seen in
+practice:
+
+- A HID report request that fails is retried. Upstream printed an error and
+  gave up, and since that request is the only thing keeping reports flowing, a
+  single transient failure silenced the pad until it was physically replugged.
+- Player slots are keyed on the USB device address, so a controller that drops
+  off and returns at a new address would leave its old slot allocated forever.
+  The menu showed this as `P1 ... P2 ...` with one controller plugged in, and
+  the pad unresponsive because the game was reading the dead slot. Slots whose
+  device is no longer on the bus are now released, without relying on the
+  unmount callback, which is not delivered when a device vanishes through an
+  error rather than a clean disconnect.
+
 ### Button 1
 
 | Where | Action | Result |

@@ -12,6 +12,10 @@ void     usb_host_prepare(void);
 // Starts the host stack. Must run on the core that will call usb_host_task().
 void     usb_host_init(void);
 void     usb_host_task(void);
+
+// Retry HID report requests that failed earlier. Implemented in hid_app.cpp
+// and called from usb_host_task(); see note (f) there.
+void     hid_app_retry_pending(void);
 int      usb_host_pad_count(void);
 int      usb_host_hid_seen(void);   // HID interfaces mounted, gamepad or not
 int      usb_host_dev_seen(void);   // USB devices attached, hub included

@@ -87,6 +87,180 @@ static void draw_logo(int x, int y) {
     }
 }
 
+// Where the logo sits on the menu. The image carries a column of black padding
+// before its first lit pixel, so it is drawn one pixel left of the text column
+// to make the letters line up with the header beneath.
+#define LOGO_MENU_X   (1 * CHAR_W - LOGO_INK_X)
+#define LOGO_MENU_Y   0
+
+#if MENU_SAVER_TIMEOUT_S > 0
+// Bounce the logo around the screen, position derived from elapsed time.
+//
+// Computed from the clock rather than stepped each frame: the menu loop does
+// not run at a fixed rate, so accumulating a per-iteration delta would make
+// the speed depend on how busy the loop happens to be, and rounding would
+// drift over the minutes this runs for. A triangle wave over elapsed time is
+// exact and needs no state.
+//
+// Integer arithmetic throughout, in milliseconds. half_y is the time for one
+// top-to-bottom sweep; the horizontal half-period is scaled from it so both
+// axes move at the same pixels per second.
+static void saver_position(uint32_t elapsed_ms, int *out_x, int *out_y) {
+    const int range_y = FB_HEIGHT - LOGO_H;
+    const int range_x = FB_WIDTH  - LOGO_W;
+
+    const uint32_t half_y = (uint32_t)MENU_SAVER_BOUNCE_S * 1000u;
+    // half_x / half_y == range_x / range_y, so the speeds match.
+    const uint32_t half_x = range_x > 0
+        ? (uint32_t)((uint64_t)half_y * (uint32_t)range_x / (uint32_t)range_y)
+        : 1u;
+
+    // Start where the logo already is on the menu, so switching to the saver
+    // looks like the rest of the screen falling away rather than the logo
+    // jumping to a corner.
+    //
+    // Each axis needs its own phase offset: one time shift would move both
+    // together, and the menu position does not lie on the diagonal the logo
+    // would otherwise be travelling along.
+    int start_x = LOGO_MENU_X, start_y = LOGO_MENU_Y;
+    if (start_x < 0) start_x = 0;
+    if (start_x > range_x) start_x = range_x;
+    if (start_y < 0) start_y = 0;
+    if (start_y > range_y) start_y = range_y;
+
+    // Rounded UP. The position is recovered from the offset by this same
+    // division in reverse, and truncating both ways loses a pixel -- the logo
+    // would start one pixel left of where the menu drew it and visibly twitch
+    // at the changeover.
+    const uint32_t off_x = range_x > 0
+        ? (uint32_t)(((uint64_t)start_x * half_x + (uint32_t)range_x - 1u)
+                     / (uint32_t)range_x) : 0u;
+    const uint32_t off_y = range_y > 0
+        ? (uint32_t)(((uint64_t)start_y * half_y + (uint32_t)range_y - 1u)
+                     / (uint32_t)range_y) : 0u;
+
+    // Triangle wave: sweep one way over a half period, back over the next.
+    const uint32_t py = (elapsed_ms + off_y) % (half_y * 2u);
+    const uint32_t px = (elapsed_ms + off_x) % (half_x * 2u);
+    int y = (int)((uint64_t)(py % half_y) * (uint32_t)range_y / half_y);
+    int x = (int)((uint64_t)(px % half_x) * (uint32_t)range_x / half_x);
+    if (py >= half_y) y = range_y - y;
+    if (px >= half_x) x = range_x - x;
+
+    *out_x = x;
+    *out_y = y;
+}
+
+// Number of steps the fade is divided into. Each step scales the framebuffer
+// once, so this trades smoothness against work per frame; 32 is imperceptibly
+// smooth at half a second and costs about 3 ms a step.
+#define SAVER_FADE_STEPS 32
+
+// Darken everything except the logo by one step of a linear fade.
+//
+// Scaling in place, with no copy of the original: there is no room for a
+// second 150 KB framebuffer. To land on original*(1 - i/N) at step i, given
+// the buffer already holds original*(1 - (i-1)/N), the factor for this step is
+// (N-i)/(N-i+1) -- which is exact and reaches zero on the final step.
+//
+// Rows are split around the logo rather than testing every pixel, so the inner
+// loops stay tight.
+static void saver_fade_step(int step, int logo_x, int logo_y) {
+    const int rem = SAVER_FADE_STEPS - step;         // numerator
+    const int den = rem + 1;
+    uint16_t *fb = video_framebuffer();
+
+    for (int y = 0; y < FB_HEIGHT; y++) {
+        const bool spans_logo = (y >= logo_y && y < logo_y + LOGO_H);
+        int x = 0;
+        while (x < FB_WIDTH) {
+            int run_end = FB_WIDTH;
+            if (spans_logo) {
+                if (x < logo_x)               run_end = logo_x;
+                else if (x < logo_x + LOGO_W) { x = logo_x + LOGO_W; continue; }
+            }
+            uint16_t *p = &fb[y * FB_WIDTH + x];
+            for (int i = 0; i < run_end - x; i++) {
+                const uint16_t c = p[i];
+                const uint32_t r = ((c >> 11) & 0x1F) * rem / den;
+                const uint32_t g = ((c >>  5) & 0x3F) * rem / den;
+                const uint32_t b = ( c        & 0x1F) * rem / den;
+                p[i] = (uint16_t)((r << 11) | (g << 5) | b);
+            }
+            x = run_end;
+        }
+    }
+}
+
+// Paint everything except the logo black. Used to finish the fade, since
+// integer rounding can leave a pixel or two just above zero.
+static void saver_clear_around_logo(int x, int y) {
+    if (y > 0)
+        video_fill_rect(0, 0, FB_WIDTH, y, RGB565(0, 0, 0));
+    if (y + LOGO_H < FB_HEIGHT)
+        video_fill_rect(0, y + LOGO_H, FB_WIDTH, FB_HEIGHT - (y + LOGO_H),
+                        RGB565(0, 0, 0));
+    if (x > 0)
+        video_fill_rect(0, y, x, LOGO_H, RGB565(0, 0, 0));
+    if (x + LOGO_W < FB_WIDTH)
+        video_fill_rect(x + LOGO_W, y, FB_WIDTH - (x + LOGO_W), LOGO_H,
+                        RGB565(0, 0, 0));
+}
+
+// Draw one frame of the screen saver.
+//
+// There is a single framebuffer and the display scans it continuously, so a
+// clear-then-redraw leaves a window in which the scanout can read a screen
+// with no logo on it. That showed up as the logo flickering roughly once a
+// second -- the beat between the redraw rate and the 60 Hz refresh.
+//
+// Instead the logo is drawn at its NEW position first, and only then is the
+// part of the OLD rectangle it no longer covers painted out. The logo is
+// therefore present in the framebuffer at every instant, and the erase touches
+// a sliver about one pixel wide rather than the whole screen.
+static void draw_saver(uint32_t elapsed_ms, bool first_frame) {
+    static int ox = 0, oy = 0;
+
+    int x, y;
+    saver_position(elapsed_ms, &x, &y);
+
+    if (first_frame) {
+        // The fade stage has already blacked out everything but the logo, and
+        // the logo is sitting at exactly this position, so there is nothing to
+        // draw -- just adopt it as the starting point.
+        ox = x; oy = y;
+        return;
+    }
+
+    if (x == ox && y == oy) return;          // nothing moved; leave it alone
+
+    draw_logo(x, y);
+
+    // Paint out the old rectangle minus the new one: up to four strips, none
+    // of which overlaps the logo just drawn.
+    const int ix0 = (ox > x) ? ox : x;                    // intersection
+    const int ix1 = ((ox + LOGO_W) < (x + LOGO_W)) ? (ox + LOGO_W) : (x + LOGO_W);
+    const int iy0 = (oy > y) ? oy : y;
+    const int iy1 = ((oy + LOGO_H) < (y + LOGO_H)) ? (oy + LOGO_H) : (y + LOGO_H);
+
+    if (ix0 >= ix1 || iy0 >= iy1) {
+        // No overlap at all -- erase the whole of the old position.
+        video_fill_rect(ox, oy, LOGO_W, LOGO_H, RGB565(0, 0, 0));
+    } else {
+        if (iy0 > oy)
+            video_fill_rect(ox, oy, LOGO_W, iy0 - oy, RGB565(0, 0, 0));
+        if (iy1 < oy + LOGO_H)
+            video_fill_rect(ox, iy1, LOGO_W, (oy + LOGO_H) - iy1, RGB565(0, 0, 0));
+        if (ix0 > ox)
+            video_fill_rect(ox, iy0, ix0 - ox, iy1 - iy0, RGB565(0, 0, 0));
+        if (ix1 < ox + LOGO_W)
+            video_fill_rect(ix1, iy0, (ox + LOGO_W) - ix1, iy1 - iy0, RGB565(0, 0, 0));
+    }
+
+    ox = x; oy = y;
+}
+#endif
+
 static void draw_text(int col, int row, const char *s, uint16_t fg,
                       uint16_t bg, bool draw_bg) {
     int x = col * CHAR_W, y = row * CHAR_H;
@@ -188,7 +362,7 @@ static void draw_frame(int selected, int scroll, const char *status,
     // Positioned so the logo's letters -- not the edge of the image, which has
     // a column of black padding -- start at the same x as the "SELECT GAME
     // CARTRIDGE" header, which is drawn at text column 1.
-    draw_logo(1 * CHAR_W - LOGO_INK_X, 0);
+    draw_logo(LOGO_MENU_X, LOGO_MENU_Y);
     {
         // The build ID stays on screen so a stale flash is obvious at a
         // glance. Right-justified, and centred vertically in the 16-pixel band.
@@ -329,6 +503,18 @@ static bool edge_or_repeat(Repeat *r, uint16_t now, uint16_t mask) {
 // Main loop
 // ---------------------------------------------------------------------------
 bool menu_select_rom(char *out_path, size_t out_len) {
+#if MENU_SAVER_TIMEOUT_S > 0
+    // Screen saver state. last_input is bumped by any pad or board button
+    // activity; saver_since marks when the bouncing started, so the animation
+    // begins from the top-left corner every time rather than mid-flight. The
+    // redraw is paced by the vertical blank, so no frame timer is needed.
+    absolute_time_t last_input  = get_absolute_time();
+    absolute_time_t saver_since = last_input;
+    bool            saver       = false;
+    int             saver_steps = 0;      // fade steps applied so far
+    bool            saver_begun = false;  // has the bounce started?
+#endif
+
     // Remembered across calls, so returning from a game with Button 1 lands on
     // the cartridge you were just playing rather than the top of the list.
     // Clamped because the list is rescanned each time and may have shrunk.
@@ -415,6 +601,12 @@ bool menu_select_rom(char *out_path, size_t out_len) {
             need_redraw = true;
         }
         if (mounted) {
+#if MENU_SAVER_TIMEOUT_S > 0
+            // The drive screen is its own display; hold the saver off, and do
+            // not let the idle time accumulate while it is showing.
+            last_input = get_absolute_time();
+            saver = false;
+#endif
             if (need_redraw) {
                 video_clear(COL_BG);
                 video_fill_rect(0, 0, FB_WIDTH, CHAR_H * 2, COL_TITLE_BG);
@@ -450,6 +642,110 @@ bool menu_select_rom(char *out_path, size_t out_len) {
         // Board buttons work too, in case no pad is plugged in yet.
         if (!gpio_get(PIN_BUTTON2)) now |= MENU_DOWN;
         if (!gpio_get(PIN_BUTTON3)) now |= MENU_A;
+
+#if MENU_SAVER_TIMEOUT_S > 0
+        {
+            const absolute_time_t t = get_absolute_time();
+
+            // Button 1 is not part of `now` -- it is read separately below --
+            // but it must still count as activity, or the saver could not be
+            // woken by it and the hold-to-exit would be unreachable while it
+            // was running.
+            const bool b1 = !gpio_get(PIN_BUTTON1);
+
+            if (now != 0 || b1) {
+                last_input = t;
+                if (saver) {
+                    saver       = false;
+                    need_redraw = true;
+                    if (now != 0) {
+                        // Woken by the pad or Button 2/3: swallow the press,
+                        // so the input that wakes the screen does not also
+                        // move the cursor or load a game.
+                        rpt.prev = now;
+                        continue;
+                    }
+                    // Woken by Button 1: fall through, so a press that is held
+                    // goes on to count towards leaving ColecoJam.
+                }
+            } else if (!saver &&
+                       absolute_time_diff_us(last_input, t) >=
+                           (int64_t)MENU_SAVER_TIMEOUT_S * 1000000) {
+                saver       = true;
+                saver_since = t;
+                saver_steps = 0;
+                saver_begun = false;
+                // Nothing is drawn yet: the menu stays on screen and the fade
+                // below takes it away.
+            }
+
+            if (saver) {
+                // Wait for the vertical blank, then draw. There is one
+                // framebuffer and the display scans it continuously, so
+                // starting the update just after a frame ends gives the whole
+                // frame period to finish it, and the update rate is locked to
+                // the refresh instead of beating against it.
+                //
+                // Polled rather than video_wait_vsync(), so the USB stacks
+                // keep being serviced while we wait. Blocking for a whole
+                // frame would drop tuh_task() from the loop's usual rate to
+                // 60 Hz for as long as the saver runs, and a host stack that
+                // is serviced sparsely is the likeliest way to lose a
+                // controller.
+                {
+                    const uint32_t frame = video_frames_rendered();
+                    while (video_frames_rendered() == frame) {
+                        usb_host_task();
+                        usb_msc_task();
+                        tight_loop_contents();
+                    }
+                }
+
+                const uint32_t since = (uint32_t)
+                    (absolute_time_diff_us(saver_since, get_absolute_time())
+                     / 1000);
+
+                // Three stages: fade the menu away around the logo, hold
+                // everything still, then start the logo moving.
+                //
+                // Through local constants rather than the macros directly, so
+                // setting either to 0 to skip a stage does not produce a
+                // "comparison of unsigned expression is always false" warning.
+                const uint32_t fade_ms  = (uint32_t)MENU_SAVER_FADE_MS;
+                const uint32_t pause_ms = (uint32_t)MENU_SAVER_PAUSE_MS;
+
+                if (since < fade_ms) {
+                    // Catch up to the step this moment calls for, so the fade
+                    // takes the configured time whatever the frame rate does.
+                    const int want = (int)((uint64_t)since * SAVER_FADE_STEPS
+                                           / (fade_ms ? fade_ms : 1u));
+                    while (saver_steps < want && saver_steps < SAVER_FADE_STEPS) {
+                        saver_steps++;
+                        saver_fade_step(saver_steps, LOGO_MENU_X, LOGO_MENU_Y);
+                    }
+                } else if (since < fade_ms + pause_ms) {
+                    if (saver_steps < SAVER_FADE_STEPS) {
+                        // Finish the fade exactly, then hold. Integer rounding
+                        // can leave a pixel just above zero, so this paints the
+                        // remainder out rather than trusting the arithmetic.
+                        saver_steps = SAVER_FADE_STEPS;
+                        saver_clear_around_logo(LOGO_MENU_X, LOGO_MENU_Y);
+                    }
+                } else {
+                    // Bounce. Time is measured from the end of the pause, so
+                    // the logo sets off from where the menu drew it.
+                    if (!saver_begun) {
+                        saver_begun = true;
+                        saver_clear_around_logo(LOGO_MENU_X, LOGO_MENU_Y);
+                        draw_saver(0, true);
+                    } else {
+                        draw_saver(since - fade_ms - pause_ms, false);
+                    }
+                }
+                continue;
+            }
+        }
+#endif
 
         // Button 1 HELD for a second: leave ColecoJam altogether. Returns false,
         // and main() hands off to coleco_exit() -- the pico-bootLoader picker
