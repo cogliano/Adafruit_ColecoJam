@@ -469,7 +469,7 @@
 // When the saver starts, the menu fades to black around the logo over this
 // many milliseconds, and then everything holds still for the pause below
 // before the logo begins to move. Either may be 0 to skip that stage.
-#define MENU_SAVER_FADE_MS    1000
+#define MENU_SAVER_FADE_MS    1500
 #define MENU_SAVER_PAUSE_MS   500
 
 // Seconds for the logo to travel from the top of the screen to the bottom.
