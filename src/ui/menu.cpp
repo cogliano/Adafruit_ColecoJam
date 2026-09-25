@@ -513,6 +513,10 @@ bool menu_select_rom(char *out_path, size_t out_len) {
     bool            saver       = false;
     int             saver_steps = 0;      // fade steps applied so far
     bool            saver_begun = false;  // has the bounce started?
+
+    // Set when the saver is dismissed, cleared when every button is released.
+    // While set, input is ignored entirely -- see where it is applied below.
+    bool            swallow_input = false;
 #endif
 
     // Remembered across calls, so returning from a game with Button 1 lands on
@@ -659,10 +663,17 @@ bool menu_select_rom(char *out_path, size_t out_len) {
                     saver       = false;
                     need_redraw = true;
                     if (now != 0) {
-                        // Woken by the pad or Button 2/3: swallow the press,
-                        // so the input that wakes the screen does not also
-                        // move the cursor or load a game.
-                        rpt.prev = now;
+                        // Woken by the pad or Button 2/3: ignore that input
+                        // until it is released, so it does not also move the
+                        // cursor or load a game.
+                        //
+                        // Setting rpt.prev alone is not enough. That blocks
+                        // the press EDGE, but rpt.next is still at whatever
+                        // value it held minutes ago, so edge_or_repeat() takes
+                        // its auto-repeat branch on the very next pass and
+                        // again 60 ms later -- which moved the cursor two
+                        // places on a single press.
+                        swallow_input = true;
                         continue;
                     }
                     // Woken by Button 1: fall through, so a press that is held
@@ -746,6 +757,19 @@ bool menu_select_rom(char *out_path, size_t out_len) {
             }
         }
 #endif
+
+        // Drop input left over from dismissing the screen saver, until every
+        // button has been released. Placed after the saver block so the held
+        // button still counts as activity there and cannot let the saver
+        // restart underneath it.
+        if (swallow_input) {
+            if (now == 0) {
+                swallow_input = false;
+            } else {
+                now = 0;                 // as though nothing were pressed
+                rpt.prev = 0;            // so the next real press is an edge
+            }
+        }
 
         // Button 1 HELD for a second: leave ColecoJam altogether. Returns false,
         // and main() hands off to coleco_exit() -- the pico-bootLoader picker

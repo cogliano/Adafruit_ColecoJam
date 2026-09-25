@@ -286,9 +286,9 @@ game you were last playing.
 ### Screen saver
 
 After a period with no input the menu gives way to the logo bouncing around the
-screen. Any pad direction, face button or board button restores the list, and
-the press that wakes it is swallowed so it cannot also move the cursor or start
-a game. Two settings in `include/config.h`:
+screen. Any pad direction, face button or board button restores the list, and that
+input is then ignored until it is released, so it cannot also move the cursor
+or start a game. Two settings in `include/config.h`:
 
 ```c
 #define MENU_SAVER_TIMEOUT_S  120   // idle seconds before it starts; 0 disables
