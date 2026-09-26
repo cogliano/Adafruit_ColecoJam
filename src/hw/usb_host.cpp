@@ -266,6 +266,16 @@ void usb_host_task(void) {
     // unplugged, because the request for the next report is the only thing
     // keeping reports flowing. See hid_app.cpp, note (f).
     hid_app_retry_pending();
+
+    // Once a second, check that every mounted HID interface still has a
+    // transfer outstanding, and re-arm any that does not. A transfer can be
+    // lost without anything reporting a failure, which leaves a controller
+    // silent while it still shows as connected and correctly assigned.
+    static absolute_time_t next_keepalive = { 0 };
+    if (time_reached(next_keepalive)) {
+        next_keepalive = make_timeout_time_ms(1000);
+        hid_app_keepalive();
+    }
 #endif
 }
 

@@ -13,9 +13,13 @@ void     usb_host_prepare(void);
 void     usb_host_init(void);
 void     usb_host_task(void);
 
-// Retry HID report requests that failed earlier. Implemented in hid_app.cpp
-// and called from usb_host_task(); see note (f) there.
+// Retry HID report requests that failed earlier, and release player slots
+// whose device has gone. Implemented in hid_app.cpp; see notes (f) and (g).
 void     hid_app_retry_pending(void);
+
+// Re-arm any HID interface whose IN transfer has been lost. Called about once
+// a second from usb_host_task(); see note (h) in hid_app.cpp.
+void     hid_app_keepalive(void);
 int      usb_host_pad_count(void);
 int      usb_host_hid_seen(void);   // HID interfaces mounted, gamepad or not
 int      usb_host_dev_seen(void);   // USB devices attached, hub included

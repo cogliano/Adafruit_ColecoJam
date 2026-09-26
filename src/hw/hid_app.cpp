@@ -96,6 +96,40 @@ static bool hid_request_report(uint8_t dev_addr, uint8_t instance) {
 // Defined further down, where the player-slot table is in scope.
 static void hid_reap_stale_players(void);
 
+// ColecoJam (h): recover a HID interface whose IN transfer has been lost.
+//
+// The retry above only helps when tuh_hid_receive_report() REPORTS a failure.
+// A transfer that is armed successfully and then silently disappears signals
+// nothing, so nothing ever re-arms it and the controller goes quiet with
+// everything still looking mounted and correctly assigned.
+//
+// A plain "no reports for N seconds" watchdog will not do: an interrupt IN
+// transfer completes only when the device has new data, so an untouched pad is
+// silent for minutes -- exactly the screen-saver case.
+//
+// tuh_hid_receive_report() is itself the test. It returns false when a
+// transfer is already pending, with no side effect, and true when there was
+// none outstanding -- which for a mounted interface means the previous one was
+// lost, and the call has just re-armed it. Called about once a second from
+// usb_host_task().
+void hid_app_keepalive(void) {
+    for (uint8_t addr = 1; addr <= CFG_TUH_DEVICE_MAX; addr++) {
+        if (!tuh_mounted(addr)) continue;
+
+        const uint8_t instances = tuh_hid_instance_count(addr);
+        for (uint8_t inst = 0; inst < instances; inst++) {
+            if (!tuh_hid_mounted(addr, inst)) continue;
+            if (tuh_hid_receive_report(addr, inst)) {
+                // Nothing had been outstanding: the transfer was lost and is
+                // now re-armed. Worth printing -- if this appears repeatedly
+                // something upstream is dropping transfers regularly.
+                printf("Re-armed lost HID transfer (device %u interface %u)\n",
+                       addr, inst);
+            }
+        }
+    }
+}
+
 // Retry any request that failed earlier. Called from usb_host_task(), so it
 // runs at whatever rate the host stack is being serviced.
 // Declared in usb_host.h, which every caller here already includes. Plain C++

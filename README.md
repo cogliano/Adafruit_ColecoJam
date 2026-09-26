@@ -327,6 +327,15 @@ practice:
 - A HID report request that fails is retried. Upstream printed an error and
   gave up, and since that request is the only thing keeping reports flowing, a
   single transient failure silenced the pad until it was physically replugged.
+- A HID interrupt transfer can also be lost *without* anything reporting a
+  failure, which leaves the pad silent while it still shows as connected and
+  correctly assigned (`P1 ...` with no phantom second slot). Once a second the
+  host task calls `tuh_hid_receive_report()` on every mounted interface: it
+  returns false and does nothing when a transfer is already pending, and true
+  only when none was outstanding -- which for a mounted interface means the
+  last one vanished, and the call has just re-armed it. A plain timeout
+  watchdog would not work here, because an untouched controller legitimately
+  sends nothing for minutes.
 - Player slots are keyed on the USB device address, so a controller that drops
   off and returns at a new address would leave its old slot allocated forever.
   The menu showed this as `P1 ... P2 ...` with one controller plugged in, and
