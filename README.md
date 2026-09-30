@@ -287,7 +287,9 @@ game you were last playing.
 
 On the way into the cartridge menu the logo fades up in the centre of the
 screen, a light sweeps across it, it holds, then fades out and the menu fades
-in. Any controller or board button abandons it.
+in. Any controller or board button abandons it, and that press is then ignored
+until it is released, so skipping the titles cannot also pick a game off the
+menu underneath.
 
 ```c
 #define TITLE_SEQUENCE        1     // 0 disables it entirely

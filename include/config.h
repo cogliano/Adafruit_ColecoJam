@@ -529,7 +529,7 @@
 // perfectly matched an older decoder, and it took a full round of analysis to
 // realise the source and the firmware had diverged. Bump this whenever you
 // change something you intend to test.
-#define ACJ_BUILD_ID        "version 1.6"
+#define ACJ_BUILD_ID        "version 1.7"
 
 // ---------------------------------------------------------------------------
 // USB clock test mode overrides. Placed last so they win over the settings

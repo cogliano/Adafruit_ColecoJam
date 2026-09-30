@@ -749,12 +749,23 @@ bool menu_select_rom(char *out_path, size_t out_len) {
     bool            saver       = false;
     int             saver_steps = 0;      // fade steps applied so far
     bool            saver_begun = false;  // has the bounce started?
-
-    // Set when the saver is dismissed, cleared when every button is released.
-    // While set, input is ignored entirely -- see where it is applied below.
-    bool            swallow_input = false;
-
 #endif
+
+    // Ignore input until every button is released.
+    //
+    // Starts TRUE, so anything already held when the menu opens is ignored
+    // rather than acted on. That covers pressing a button to skip the title
+    // sequence, which otherwise arrives here as a fresh press and launches
+    // whatever the cursor happens to be sitting on. It also covers the screen
+    // saver being dismissed, and a button still held from leaving a game.
+    //
+    // Costs nothing in the normal case: with nothing held, the first pass
+    // clears it immediately.
+    //
+    // Declared outside the screen-saver guard above because it is used
+    // unconditionally further down -- inside it, this would not compile with
+    // MENU_SAVER_TIMEOUT_S set to 0.
+    bool swallow_input = true;
 
     // Remembered across calls, so returning from a game with Button 1 lands on
     // the cartridge you were just playing rather than the top of the list.
@@ -1023,10 +1034,9 @@ bool menu_select_rom(char *out_path, size_t out_len) {
         }
 #endif
 
-        // Drop input left over from dismissing the screen saver, until every
-        // button has been released. Placed after the saver block so the held
-        // button still counts as activity there and cannot let the saver
-        // restart underneath it.
+        // Drop input that was already held, until every button is released.
+        // Placed after the saver block so a held button still counts as
+        // activity there and cannot let the saver restart underneath it.
         if (swallow_input) {
             if (now == 0) {
                 swallow_input = false;
