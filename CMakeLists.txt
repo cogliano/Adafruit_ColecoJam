@@ -68,6 +68,7 @@ add_executable(colecojam
     src/hw/video_hstx.cpp
     src/hw/video_hdmi.cpp
     src/hw/audio.cpp
+    src/hw/sfx.cpp
     src/hw/sdcard.cpp
     src/hw/usb_host.cpp
     src/hw/gamepad.cpp

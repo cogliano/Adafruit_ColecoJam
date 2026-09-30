@@ -16,6 +16,8 @@
 #include "../hw/usb_msc.h"
 #include "../hw/audio.h"
 #include "../hw/cart_reader.h"
+#include "../hw/sfx.h"
+#include "../hw/hdmi_audio.h"
 
 #include "pico/stdlib.h"
 #include <string.h>
@@ -60,10 +62,40 @@ extern "C" {
 // ---------------------------------------------------------------------------
 // Text helpers
 // ---------------------------------------------------------------------------
+// Global brightness, 0..16, applied by the two pixel writers below and by the
+// fill helpers draw_frame() uses. It exists so a screen can be drawn dark and
+// then redrawn progressively brighter: fading IN cannot be done by scaling the
+// framebuffer, because the original is gone the moment it is scaled down, and
+// there is no room for a second 150 KB copy to fade from.
+static uint8_t s_dim = 16;
+
+#if TITLE_SEQUENCE
+// Set by the title sequence: the next cartridge menu is faded up rather than
+// appearing at once. Cleared as soon as it is used.
+static bool s_menu_fade_in = false;
+#endif
+
+static inline uint16_t dim565(uint16_t c) {
+    if (s_dim >= 16) return c;
+    if (s_dim == 0)  return 0;
+    const uint32_t r = ((c >> 11) & 0x1F) * s_dim / 16;
+    const uint32_t g = ((c >>  5) & 0x3F) * s_dim / 16;
+    const uint32_t b = ( c        & 0x1F) * s_dim / 16;
+    return (uint16_t)((r << 11) | (g << 5) | b);
+}
+
+static void fill_dim(int x, int y, int w, int h, uint16_t c) {
+    video_fill_rect(x, y, w, h, dim565(c));
+}
+
+static void clear_dim(uint16_t c) { video_clear(dim565(c)); }
+
 static void draw_char(int x, int y, char c, uint16_t fg, uint16_t bg,
                       bool draw_bg) {
     if (c < FONT_FIRST_CHAR || c > FONT_LAST_CHAR) c = ' ';
     const uint8_t *g = font8x8[c - FONT_FIRST_CHAR];
+    fg = dim565(fg);
+    bg = dim565(bg);
     for (int row = 0; row < 8; row++) {
         uint8_t bits = g[row];
         for (int col = 0; col < 8; col++) {
@@ -82,7 +114,7 @@ static void draw_logo(int x, int y) {
         for (int c = 0; c < LOGO_W; c++) {
             const int fx = x + c;
             if (fx < 0 || fx >= FB_WIDTH) continue;
-            video_set_pixel(fx, fy, logo_rgb565[r * LOGO_W + c]);
+            video_set_pixel(fx, fy, dim565(logo_rgb565[r * LOGO_W + c]));
         }
     }
 }
@@ -206,6 +238,210 @@ static void saver_clear_around_logo(int x, int y) {
         video_fill_rect(x + LOGO_W, y, FB_WIDTH - (x + LOGO_W), LOGO_H,
                         RGB565(0, 0, 0));
 }
+
+#if TITLE_SEQUENCE
+// ---------------------------------------------------------------------------
+// Boot title sequence
+// ---------------------------------------------------------------------------
+#define TITLE_X  ((FB_WIDTH  - LOGO_W) / 2)
+#define TITLE_Y  ((FB_HEIGHT - LOGO_H) / 2)
+
+// Draw the logo with a brightness scale and an optional band of light.
+//
+//   bright  0..16, scales every channel -- the fade in and out
+//   sweep_x centre of the highlight in logo-local pixels; anything outside
+//           -SWEEP_HALF..LOGO_W+SWEEP_HALF leaves the logo untouched
+//
+// The highlight pushes colours toward white rather than adding a constant, so
+// it brightens the dark outline as much as the lit letters and cannot wrap
+// round on a channel that is already at maximum.
+#define TITLE_SWEEP_HALF 28
+
+static void draw_logo_lit(int bright, int sweep_x) {
+    for (int r = 0; r < LOGO_H; r++) {
+        const int fy = TITLE_Y + r;
+        if (fy < 0 || fy >= FB_HEIGHT) continue;
+        for (int c = 0; c < LOGO_W; c++) {
+            const int fx = TITLE_X + c;
+            if (fx < 0 || fx >= FB_WIDTH) continue;
+
+            const uint16_t src = logo_rgb565[r * LOGO_W + c];
+            uint32_t rr = ((src >> 11) & 0x1F) * (uint32_t)bright / 16u;
+            uint32_t gg = ((src >>  5) & 0x3F) * (uint32_t)bright / 16u;
+            uint32_t bb = ( src        & 0x1F) * (uint32_t)bright / 16u;
+
+            // Light the logo's INK only, never its background.
+            //
+            // Lighting every pixel made the highlight a visible rectangle
+            // sliding over the black, which read as blocky. The background and
+            // the insides of the letters are pure black in the source, so
+            // testing for that isolates the ink exactly, with no threshold to
+            // pick.
+            if (src != 0) {
+                int d = c - sweep_x;
+                if (d < 0) d = -d;
+                if (d < TITLE_SWEEP_HALF) {
+                    // Squared falloff rather than linear: the band then fades
+                    // out gradually at its edges instead of ending on a hard
+                    // line, which is the other half of the blockiness.
+                    const uint32_t lin = (uint32_t)(TITLE_SWEEP_HALF - d);
+                    const uint32_t k   = lin * lin * 255u
+                                       / (TITLE_SWEEP_HALF * TITLE_SWEEP_HALF);
+                    rr += (0x1Fu - rr) * k / 255u;
+                    gg += (0x3Fu - gg) * k / 255u;
+                    bb += (0x1Fu - bb) * k / 255u;
+                }
+            }
+            video_set_pixel(fx, fy, (uint16_t)((rr << 11) | (gg << 5) | bb));
+        }
+    }
+}
+
+// True if anything is pressed. Used to abandon the sequence.
+static bool title_any_input(void) {
+    if ((usb_host_raw_buttons(0) | usb_host_raw_buttons(1)) != 0) return true;
+    if (!gpio_get(PIN_BUTTON1)) return true;
+    if (!gpio_get(PIN_BUTTON2)) return true;
+    if (!gpio_get(PIN_BUTTON3)) return true;
+    return false;
+}
+
+// Wait for one frame, servicing USB so the host stack is not starved and a
+// controller plugged in during the titles still enumerates.
+// Push any sound that is playing into the HDMI audio queue.
+//
+// Structured exactly like the emulator's pump, and for the same two reasons.
+//
+// Samples that the queue will not take are KEPT, not dropped. sfx_render()
+// advances the playback position as it fills a buffer, so discarding the
+// remainder loses that audio for good and moves the sound on regardless --
+// it plays through faster and ends early, which is what turned a 1.8 second
+// chime into a chirp.
+//
+// And the refill is capped. Without a limit, one pass can run away through
+// the whole sample while the queue refuses everything, emptying the sound
+// into nowhere in a single frame.
+#if AUDIO_SINK == AUDIO_SINK_HDMI
+static void title_pump_audio(void) {
+    static int16_t pend[128];
+    static int     pend_len = 0;
+
+    for (int guard = 0; guard < 16; guard++) {
+        if (hdmi_audio_queue_level() >= HDMI_AUDIO_QUEUE_TARGET) break;
+
+        if (pend_len == 0) {
+            if (!sfx_active()) break;
+            sfx_render(pend, (int)(sizeof(pend) / sizeof(pend[0])));
+            pend_len = (int)(sizeof(pend) / sizeof(pend[0]));
+        }
+
+        const int used = hdmi_audio_submit(pend, pend_len);
+        if (used <= 0) break;                 // queue full; keep the rest
+
+        if (used < pend_len)
+            memmove(pend, pend + used, (size_t)(pend_len - used) * sizeof(pend[0]));
+        pend_len -= used;
+    }
+}
+#endif
+
+// Wait for one frame, servicing USB so the host stack is not starved and a
+// controller plugged in during the titles still enumerates.
+static void title_next_frame(void) {
+#if AUDIO_SINK == AUDIO_SINK_HDMI
+    // Pump before waiting as well as during: if this is called just after a
+    // frame boundary the loop below may not run at all, and the queue would
+    // go a whole frame without a refill.
+    title_pump_audio();
+#endif
+    const uint32_t f = video_frames_rendered();
+    while (video_frames_rendered() == f) {
+        usb_host_task();
+        usb_msc_task();
+#if AUDIO_SINK == AUDIO_SINK_HDMI
+        title_pump_audio();
+#endif
+        tight_loop_contents();
+    }
+}
+
+void menu_title_sequence(void) {
+    // The USB drive screen owns the display; do not paint over it.
+    if (usb_msc_host_connected()) return;
+
+    video_clear(RGB565(0, 0, 0));
+
+    const uint32_t sync_ms  = TITLE_SYNC_DELAY_MS;
+    const uint32_t fade_in  = TITLE_FADE_IN_MS;
+    const uint32_t sw_delay = TITLE_SWEEP_DELAY_MS;
+    const uint32_t sweep    = TITLE_SWEEP_MS;
+    const uint32_t hold     = TITLE_HOLD_MS;
+    const uint32_t fade_out = TITLE_FADE_OUT_MS;
+    const uint32_t total    = sync_ms + fade_in + sw_delay + sweep
+                            + hold + fade_out;
+
+    const absolute_time_t t0 = get_absolute_time();
+    bool abandoned     = false;
+    bool chime_started = false;
+
+    for (;;) {
+        title_next_frame();
+
+        if (title_any_input()) { abandoned = true; break; }
+
+        const uint32_t t = (uint32_t)
+            (absolute_time_diff_us(t0, get_absolute_time()) / 1000);
+        if (t >= total) break;
+
+        // The chime starts once, its own delay after the fade completes --
+        // separate from the sweep's delay so the two can be moved apart,
+        // though they default to the same value and so begin together.
+        //
+        // Nothing waits for it: the animation carries on over it, and it is
+        // left to finish under whatever comes next.
+        if (!chime_started && t >= sync_ms &&
+            (t - sync_ms) >= fade_in + (uint32_t)TITLE_SOUND_DELAY_MS) {
+            chime_started = true;
+            sfx_play_start();
+        }
+
+        int bright  = 16;
+        int sweep_x = -1000;                 // far away: no highlight
+
+        if (t < sync_ms) {
+            // Hold black while the display locks on. Nothing is drawn, so the
+            // fade below starts from a genuinely blank screen.
+            bright = 0;
+        } else if (t - sync_ms < fade_in) {
+            bright = (int)((uint64_t)(t - sync_ms) * 16 / (fade_in ? fade_in : 1));
+        } else if (t - sync_ms < fade_in + sw_delay) {
+            // Logo is fully up; hold it a moment before the light crosses.
+        } else if (t - sync_ms < fade_in + sw_delay + sweep) {
+            // Start and finish clear of the logo so the band enters and
+            // leaves rather than appearing on top of it.
+            const uint32_t st = (t - sync_ms) - fade_in - sw_delay;
+            sweep_x = (int)(-TITLE_SWEEP_HALF
+                      + (int64_t)st * (LOGO_W + 2 * TITLE_SWEEP_HALF)
+                        / (sweep ? sweep : 1));
+        } else if (t - sync_ms < fade_in + sw_delay + sweep + hold) {
+            // Hold: nothing to vary.
+        } else {
+            const uint32_t ft = (t - sync_ms)
+                              - (fade_in + sw_delay + sweep + hold);
+            bright = 16 - (int)((uint64_t)ft * 16 / (fade_out ? fade_out : 1));
+            if (bright < 0) bright = 0;
+        }
+
+        draw_logo_lit(bright, sweep_x);
+
+    }
+
+
+    // Either way the screen ends black, so the menu fades up from nothing.
+    video_clear(RGB565(0, 0, 0));
+    s_menu_fade_in = !abandoned;
+}
+#endif  // TITLE_SEQUENCE
 
 // Draw one frame of the screen saver.
 //
@@ -349,7 +585,7 @@ int menu_scan_roms(void) {
 // ---------------------------------------------------------------------------
 static void draw_frame(int selected, int scroll, const char *status,
                        uint16_t status_col) {
-    video_clear(COL_BG);
+    clear_dim(COL_BG);
 
     // Title band: the logo, left-aligned with the list header, and the build
     // ID on the right. The band is LOGO_H tall -- three text rows -- so the
@@ -358,7 +594,7 @@ static void draw_frame(int selected, int scroll, const char *status,
     // The band is black rather than the blue used elsewhere because the logo
     // was drawn on black -- its bevels and the insides of its letters are all
     // black-backed, so on any other colour it would sit in a black box.
-    video_fill_rect(0, 0, FB_WIDTH, LOGO_H, RGB565(0, 0, 0));
+    fill_dim(0, 0, FB_WIDTH, LOGO_H, RGB565(0, 0, 0));
     // Positioned so the logo's letters -- not the edge of the image, which has
     // a column of black padding -- start at the same x as the "SELECT GAME
     // CARTRIDGE" header, which is drawn at text column 1.
@@ -386,7 +622,7 @@ static void draw_frame(int selected, int scroll, const char *status,
             int row = LIST_TOP_ROW + i;
             bool sel = (idx == selected);
 
-            if (sel) video_fill_rect(0, row * CHAR_H, FB_WIDTH, CHAR_H, COL_SEL_BG);
+            if (sel) fill_dim(0, row * CHAR_H, FB_WIDTH, CHAR_H, COL_SEL_BG);
 
             // "> Donkey Kong.ROM ................ 24K"
             char sizebuf[12];
@@ -421,7 +657,7 @@ static void draw_frame(int selected, int scroll, const char *status,
     //
     // The list ends at LIST_TOP_ROW + LIST_ROWS - 1 = 24, leaving room for
     // four footer rows without overlapping it.
-    video_fill_rect(0, (ROWS - FOOTER_ROWS) * CHAR_H,
+    fill_dim(0, (ROWS - FOOTER_ROWS) * CHAR_H,
                     FB_WIDTH, CHAR_H * FOOTER_ROWS, COL_BG);
     // Mention USB drive mode only when it is off, since that is the state
     // someone might be puzzled by ("why is my SD card not showing up?").
@@ -517,6 +753,7 @@ bool menu_select_rom(char *out_path, size_t out_len) {
     // Set when the saver is dismissed, cleared when every button is released.
     // While set, input is ignored entirely -- see where it is applied below.
     bool            swallow_input = false;
+
 #endif
 
     // Remembered across calls, so returning from a game with Button 1 lands on
@@ -528,6 +765,34 @@ bool menu_select_rom(char *out_path, size_t out_len) {
     if (scroll > selected)      scroll   = selected;
     if (selected >= scroll + LIST_ROWS) scroll = selected - LIST_ROWS + 1;
     if (scroll < 0)             scroll   = 0;
+
+#if TITLE_SEQUENCE
+    // Fade the menu up if the title sequence asked for it. Each step redraws
+    // the whole frame at a higher brightness -- the screen cannot be scaled up
+    // from black, so it has to be re-rendered.
+    if (s_menu_fade_in) {
+        s_menu_fade_in = false;
+        const uint32_t fade_ms = TITLE_MENU_FADE_MS;
+        const absolute_time_t f0 = get_absolute_time();
+        for (;;) {
+            const uint32_t el = (uint32_t)
+                (absolute_time_diff_us(f0, get_absolute_time()) / 1000);
+            if (el >= fade_ms) break;
+            s_dim = (uint8_t)(el * 16 / (fade_ms ? fade_ms : 1));
+            draw_frame(selected, scroll, nullptr, COL_DIM);
+            const uint32_t f = video_frames_rendered();
+            while (video_frames_rendered() == f) {
+                usb_host_task();
+                usb_msc_task();
+                tight_loop_contents();
+            }
+            // Let a press during the fade finish it immediately.
+            if ((usb_host_raw_buttons(0) | usb_host_raw_buttons(1)) != 0)
+                break;
+        }
+        s_dim = 16;
+    }
+#endif
     Repeat rpt = { 0, get_absolute_time(), 0 };
 
     const char *status = nullptr;

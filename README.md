@@ -283,6 +283,84 @@ the selected game; on a keyboard, `X`, `S` or **Enter** does. Board **Button 2**
 and **Button 3** also work if nothing is connected yet. The list reopens on the
 game you were last playing.
 
+### Title sequence
+
+On the way into the cartridge menu the logo fades up in the centre of the
+screen, a light sweeps across it, it holds, then fades out and the menu fades
+in. Any controller or board button abandons it.
+
+```c
+#define TITLE_SEQUENCE        1     // 0 disables it entirely
+#define TITLE_SYNC_DELAY_MS  2000   // held black while the display locks on
+#define TITLE_FADE_IN_MS      700
+#define TITLE_SWEEP_DELAY_MS  500   // pause after the fade before the sweep
+#define TITLE_SOUND_DELAY_MS  500   // pause after the fade before the chime
+#define TITLE_SWEEP_MS       1000
+#define TITLE_HOLD_MS        3000
+#define TITLE_FADE_OUT_MS     700
+#define TITLE_MENU_FADE_MS    500   // cartridge menu fades in
+```
+
+The sync delay matters more than it looks. HDMI sinks commonly take two to
+five seconds to lock onto a signal after the source starts driving it, and the
+title begins about a second into boot -- so without the delay the fade and the
+sweep can both finish while the screen is still blank, and the first thing
+actually shown is the logo already sitting still. Lower it if your display
+locks quickly.
+
+A start-up chime plays `TITLE_SOUND_DELAY_MS` after the fade-in completes.
+That is a separate setting from the sweep's delay so the two can be moved
+apart, but they default to the same value and so begin together. Set
+`TITLE_SOUND` to 0 to drop it and reclaim about 17 KB of SRAM. Nothing waits
+for it: the sweep and hold carry on over it, and if the titles are abandoned it
+keeps sounding under the menu rather than being cut off.
+
+The sample lives in `src/ui/sound_start.h` at 4900 Hz, 16-bit mono, 1.8 s,
+about 17 KB. Every one of those numbers is set by the RAM budget -- see below.
+4900 Hz because 99.9% of the sound's energy is below 2 kHz, so a 2450 Hz
+Nyquist loses nothing audible, and 44100 / 4900 is exactly 9. Truncated at
+1.8 s because what follows is reverb decay already below -38 dB, with a long
+fade over the cut. 16-bit rather than 8-bit because 8-bit measured only about
+33 dB signal-to-noise even dithered, audible as granularity on a decay.
+Playback interpolates rather than repeating samples, avoiding the hard edge
+sample-and-hold puts on a quiet chime.
+
+## RAM is the binding constraint
+
+The image is built `copy_to_ram`, so everything -- code, constants and
+variables alike -- has to fit in the 512 KB main SRAM region. It is close to
+full:
+
+| | |
+|---|---|
+| framebuffer 320x240 RGB565 | 150 KB |
+| cartridge buffer | 32 KB |
+| VDP VRAM | 16 KB |
+| BIOS | 8 KB |
+| everything else, code included | the rest |
+
+There is roughly 20 KB spare. A new feature that needs more than that has to
+take it from somewhere: `TITLE_SOUND 0` frees about 17 KB, and turning off
+`VIDEO_DRIVER_PICO_HDMI` removes the `copy_to_ram` requirement altogether at
+the cost of HDMI audio. If a link fails with ``region `RAM' overflowed``, this
+is why.
+
+It does not play when a cartridge is fitted -- that boots straight into the
+game -- nor when the SD card is mounted as a USB drive, since that screen owns
+the display.
+
+Fading the menu *in* cannot be done by scaling the framebuffer, because the
+original is gone the moment it is scaled down and there is no room for a second
+150 KB copy. Instead the drawing primitives take a global brightness and the
+menu is re-rendered at each step. The light sweep pushes colours toward white
+rather than adding a constant, so it brightens the dark outline as much as the
+lit letters and cannot wrap round a channel that is already at maximum. It
+lights only the logo's ink: the background and the insides of the letters are
+pure black in the source, so testing for that isolates the artwork exactly and
+the highlight never shows as a rectangle sliding over the black. Its falloff is
+squared rather than linear, so the band fades out at its edges instead of
+ending on a hard line.
+
 ### Screen saver
 
 After a period with no input the menu gives way to the logo bouncing around the

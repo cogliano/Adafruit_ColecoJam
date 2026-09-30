@@ -21,3 +21,9 @@ void menu_message(const char *title, const char *line1, const char *line2,
 // the in-game debug overlay, which lives in the border around the 256x192
 // ColecoVision image and so never disturbs the picture.
 void menu_debug_line(int row, const char *text);
+
+// Boot title sequence: the logo fades up in the centre, a light sweeps across
+// it, it holds, then fades out. Any button abandons it. Does nothing when the
+// SD card is mounted as a USB drive, and is compiled out when TITLE_SEQUENCE
+// is 0. Call before menu_select_rom(), which then fades the menu up.
+void menu_title_sequence(void);

@@ -36,6 +36,7 @@
 #include "hw/usb_msc.h"
 #include "hw/cart_reader.h"
 #include "hw/hdmi_audio.h"
+#include "hw/sfx.h"
 #include "hw/bootloader.h"
 #include "ui/menu.h"
 
@@ -55,6 +56,10 @@ extern "C" {
 static uint8_t bios_rom[CV_BIOS_SIZE];
 static uint8_t cart_rom[CV_ROM_MAX];
 static uint32_t cart_len = 0;
+
+// Set when a cartridge game has already run, so the boot title sequence is not
+// played on the way into the menu afterwards.
+static bool cart_played = false;
 
 static FATFS fs;
 
@@ -111,6 +116,7 @@ static void core1_main(void) {
             }
 #else
             psg_render(mix_buf, AUDIO_BUF_SAMPLES);
+            sfx_mix(mix_buf, AUDIO_BUF_SAMPLES);
 #endif
             audio_push_blocking(mix_buf, AUDIO_BUF_SAMPLES);
         }
@@ -411,6 +417,8 @@ static void run_emulator(void) {
 
                 if (pend_len == 0) {
                     psg_render(pend_buf, AUDIO_BUF_SAMPLES);
+                    // Any effect still sounding rides over the game audio.
+                    sfx_mix(pend_buf, AUDIO_BUF_SAMPLES);
                     pend_len = AUDIO_BUF_SAMPLES;
                 }
 
@@ -679,6 +687,7 @@ int main(void) {
         if (cart_len >= 0x2000) {
             cv_load_rom(cart_rom, cart_len);
             cv_reset();
+            cart_played = true;
             run_emulator();
             // Button 1 pressed during the cartridge game: carry on into the
             // browser below, so SD games are reachable without pulling the
@@ -693,9 +702,28 @@ int main(void) {
     // in a game. The SD card stays mounted and the BIOS stays loaded, so the
     // return is instant rather than a reboot. Each stage updates the screen,
     // so if one stops the message on the display names the exact step.
+#if TITLE_SEQUENCE
+    // Title sequence, once, before the menu is first shown.
+    //
+    // Skipped when a cartridge was fitted: that boots straight into the game,
+    // and arriving here means Button 1 was pressed to leave it, where titles
+    // would be an odd interruption rather than a boot animation.
+    if (!cart_played) menu_title_sequence();
+#endif
+
+    bool first_pass = true;
+
     for (;;) {
         // Rescanned every time: files may have been added over USB since.
-        menu_message("ADAFRUIT COLECOJAM", "Scanning /coleco for ROMs...", nullptr, false);
+        //
+        // The progress messages are skipped on the first pass. Scanning takes
+        // a few milliseconds, so they appear only as a flash -- and after the
+        // title sequence that flash lands between the titles fading out and
+        // the menu fading in, which spoils the transition. On later passes,
+        // returning from a game, they are worth having.
+        if (!first_pass)
+            menu_message("ADAFRUIT COLECOJAM", "Scanning /coleco for ROMs...",
+                         nullptr, false);
         int n = menu_scan_roms();
         if (n < 0)
             fatal(7, "No /coleco folder on the SD card.",
@@ -706,8 +734,10 @@ int main(void) {
         // back.
         printf("ROM browser: %d ROM%s\n", n, n == 1 ? "" : "s");
 
-        menu_message("ADAFRUIT COLECOJAM", "Starting cartridge browser...",
-                     "If this sticks, USB host is hanging.", false);
+        if (!first_pass)
+            menu_message("ADAFRUIT COLECOJAM", "Starting cartridge browser...",
+                         "If this sticks, USB host is hanging.", false);
+        first_pass = false;
 
         char path[MAX_FILENAME_LEN + 16];
         if (!menu_select_rom(path, sizeof(path))) {

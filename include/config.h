@@ -358,7 +358,6 @@
 // slow frame without adding noticeable latency.
 #define HDMI_AUDIO_QUEUE_TARGET 200
 
-
 // DMA channel PIO-USB transmits on. PIO_USB_DEFAULT_CONFIG hardcodes 0 without
 // claiming it, so we reserve it and hand it over just before tuh_init().
 //
@@ -457,6 +456,40 @@
 #define EMU_DEBUG_OVERLAY   0
 
 // ---------------------------------------------------------------------------
+// Boot title sequence: the logo fades up in the centre of the screen, a light
+// sweeps across it, it holds, then fades out and the cartridge menu fades in.
+//
+// Skipped when a cartridge is fitted (that boots straight into the game) and
+// when the SD card is mounted as a USB drive (that screen owns the display).
+// Any controller or board button press abandons it and goes straight to the
+// menu.
+// ---------------------------------------------------------------------------
+#define TITLE_SEQUENCE        1     // 0 disables it entirely
+
+// Held black before the animation starts, to let the HDMI display lock onto
+// the signal. Sinks commonly need 2-5 seconds from when the source starts
+// driving, and the fade and sweep are over 1.7 s in -- without this delay they
+// can happen entirely while the screen is still blank.
+// Play the start-up chime with the title sequence. Set to 0 to drop the
+// sample data entirely and reclaim about 17 KB of SRAM.
+//
+// RAM is the binding constraint in this project: the image is built
+// copy_to_ram, and with the 150 KB framebuffer, the 32 KB cartridge buffer and
+// the VDP's 16 KB of VRAM, the main 512 KB region is close to full. If a
+// future change runs out of room, this is the cheapest thing to give up.
+#define TITLE_SOUND           1
+
+#define TITLE_SYNC_DELAY_MS  2000
+
+#define TITLE_FADE_IN_MS      700   // logo fades up from black
+#define TITLE_SWEEP_DELAY_MS  500   // pause after the fade before the sweep
+#define TITLE_SOUND_DELAY_MS  500   // pause after the fade before the chime
+#define TITLE_SWEEP_MS       1000   // light travels left to right across it
+#define TITLE_HOLD_MS        3000   // logo sits there
+#define TITLE_FADE_OUT_MS     700   // logo fades back to black
+#define TITLE_MENU_FADE_MS    500   // cartridge menu fades in
+
+// ---------------------------------------------------------------------------
 // Menu screen saver: the logo bounces around the screen after a period with no
 // controller or button input. Any input restores the menu, and the press that
 // wakes it is swallowed rather than acting on the list.
@@ -464,7 +497,6 @@
 
 // Idle time before it starts, in seconds. 0 disables it entirely.
 #define MENU_SAVER_TIMEOUT_S  120
-//#define MENU_SAVER_TIMEOUT_S  10
 
 // When the saver starts, the menu fades to black around the logo over this
 // many milliseconds, and then everything holds still for the pause below
@@ -476,7 +508,7 @@
 // Smaller is faster. The horizontal speed is the same in pixels per second, so
 // the logo moves at 45 degrees and the two axes drift in and out of phase
 // instead of retracing one path.
-#define MENU_SAVER_BOUNCE_S   10
+#define MENU_SAVER_BOUNCE_S   5
 
 #define SHOW_CART_DEBUG     0
 
@@ -497,8 +529,7 @@
 // perfectly matched an older decoder, and it took a full round of analysis to
 // realise the source and the firmware had diverged. Bump this whenever you
 // change something you intend to test.
-#define ACJ_BUILD_ID        "version 1.5"
-
+#define ACJ_BUILD_ID        "version 1.6"
 
 // ---------------------------------------------------------------------------
 // USB clock test mode overrides. Placed last so they win over the settings
