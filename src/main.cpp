@@ -37,6 +37,7 @@
 #include "hw/cart_reader.h"
 #include "hw/hdmi_audio.h"
 #include "hw/sfx.h"
+#include "hw/psram.h"
 #include "hw/bootloader.h"
 #include "ui/menu.h"
 
@@ -54,7 +55,19 @@ extern "C" {
 // fits comfortably in the RP2350B's 520 KB.
 // ---------------------------------------------------------------------------
 static uint8_t bios_rom[CV_BIOS_SIZE];
-static uint8_t cart_rom[CV_ROM_MAX];
+// Cartridges, of every size, are loaded into PSRAM rather than SRAM.
+//
+// A 32 KB buffer here used to hold ordinary cartridges while only MegaCarts
+// went to PSRAM. Keeping both was 32 KB of SRAM spent on a copy of something
+// PSRAM already holds comfortably, and SRAM is the scarce resource on this
+// board -- that 32 KB is what lets the title chime exist.
+//
+// MegaCart ROMs have been executing from PSRAM for a while now, so there is no
+// open question about whether the emulator can read cartridge bytes from it at
+// speed. The cost is that PSRAM becomes required to load anything at all,
+// which is reported plainly at boot if it ever fails.
+#define cart_buffer()       cj_psram_base()
+#define cart_buffer_size()  cj_psram_bytes()
 static uint32_t cart_len = 0;
 
 // Set when a cartridge game has already run, so the boot title sequence is not
@@ -115,7 +128,7 @@ static void core1_main(void) {
                 if (++phase >= period) phase = 0;
             }
 #else
-            psg_render(mix_buf, AUDIO_BUF_SAMPLES);
+            cv_render_audio(mix_buf, AUDIO_BUF_SAMPLES);
             sfx_mix(mix_buf, AUDIO_BUF_SAMPLES);
 #endif
             audio_push_blocking(mix_buf, AUDIO_BUF_SAMPLES);
@@ -133,7 +146,7 @@ static void core1_main(void) {
                 if (++phase >= period) phase = 0;
             }
 #else
-            psg_render(mix_buf, AUDIO_BUF_SAMPLES);
+            cv_render_audio(mix_buf, AUDIO_BUF_SAMPLES);
 #endif
             audio_submit(half, mix_buf, AUDIO_BUF_SAMPLES);
         }
@@ -293,6 +306,44 @@ static void blink(int n) {
     sleep_ms(600);
 #endif
 }
+// Size of a file, or 0 if it cannot be opened. Used to decide where a
+// cartridge should be loaded before any of it is read.
+static uint32_t file_size(const char *path) {
+    FILINFO fno;
+    if (f_stat(path, &fno) != FR_OK) return 0;
+    return (uint32_t)fno.fsize;
+}
+
+// Load a cartridge into PSRAM.
+//
+// Read in chunks rather than one call: a 1 MB read would tie up the SD driver
+// for a long stretch, and this way the screen can show progress instead of
+// looking hung.
+static uint32_t load_file_psram(const char *path, uint32_t len) {
+    if (!cj_psram_ready() || len > cj_psram_bytes()) return 0;
+
+    FIL f;
+    if (f_open(&f, path, FA_READ) != FR_OK) return 0;
+
+    uint8_t *dst = cj_psram_base();
+    uint32_t done = 0;
+    while (done < len) {
+        const UINT want = (len - done > 16384u) ? 16384u : (UINT)(len - done);
+        UINT br = 0;
+        if (f_read(&f, dst + done, want, &br) != FR_OK || br == 0) break;
+        done += br;
+
+        if ((done & 0x3FFFFu) == 0) {           // every 256 KB
+            char msg[48];
+            snprintf(msg, sizeof(msg), "Loading cartridge... %lu KB",
+                     (unsigned long)(done / 1024));
+            menu_message("LOADING", msg, nullptr, false);
+        }
+    }
+    f_close(&f);
+    return done;
+}
+
 static uint32_t load_file(const char *path, uint8_t *dst, uint32_t max_len) {
     FIL f;
     if (f_open(&f, path, FA_READ) != FR_OK) return 0;
@@ -416,7 +467,7 @@ static void run_emulator(void) {
                 if (hdmi_audio_queue_level() >= HDMI_AUDIO_QUEUE_TARGET) break;
 
                 if (pend_len == 0) {
-                    psg_render(pend_buf, AUDIO_BUF_SAMPLES);
+                    cv_render_audio(pend_buf, AUDIO_BUF_SAMPLES);
                     // Any effect still sounding rides over the game audio.
                     sfx_mix(pend_buf, AUDIO_BUF_SAMPLES);
                     pend_len = AUDIO_BUF_SAMPLES;
@@ -459,9 +510,10 @@ static void run_emulator(void) {
                 dbg = 0;
                 char l[48];
                 snprintf(l, sizeof(l),
-                         "PC%04X SP%04X HL%04X(%02X) A%02X %s",
-                         z80.pc.w, z80.sp.w, z80.hl.w,
-                         cv_bus_read(z80.hl.w), z80.af.b.h,
+                         "PC%04X SP%04X bk%02lu HL%04X A%02X %s",
+                         z80.pc.w, z80.sp.w,
+                         (unsigned long)cv_rom_cur_bank(),
+                         z80.hl.w, z80.af.b.h,
                          z80.iff1 ? "EI" : "DI");
                 menu_debug_line(ROWS_DEBUG, l);
 
@@ -500,10 +552,17 @@ static void run_emulator(void) {
                 // which names the code path that went wrong.
                 char l3[48];
                 snprintf(l3, sizeof(l3),
-                         "lastNMI@%04X rd%lu vec%04X",
-                         cv_last_nmi_pc,
-                         (unsigned long)(vdp_status_reads - cv_reads_at_nmi),
-                         cv_nmi_vector);
+                         // R1 bit 6 is the display enable: a black screen
+                         // with the machine still running is usually the game
+                         // having switched the display off and not come back.
+                         // The bytes at PC say whether it is executing real
+                         // code or has wandered into empty space.
+                         "R1=%02X M%02X %02X %02X @%04X",
+                         vdp.reg[1],
+                         cv_bus_read(z80.pc.w),
+                         cv_bus_read((uint16_t)(z80.pc.w + 1)),
+                         cv_bus_read((uint16_t)(z80.pc.w + 2)),
+                         cv_last_nmi_pc);
                 menu_debug_line(ROWS_DEBUG - 1, l3);
 
                 pc_lo = 0xFFFF; pc_hi = 0x0000;
@@ -564,6 +623,15 @@ int main(void) {
     sleep_ms(10);
     set_sys_clock_khz(CV_SYS_CLK_KHZ, true);
     setup_clocks();
+
+    // Immediately after the clock change and before core 1 exists.
+    //
+    // Both matter. The PSRAM timing is derived from clk_sys, so it has to be
+    // redone once clk_sys is final; and psram_reinitialize() reaches into the
+    // QMI, which is not something to do while the other core is running the
+    // video output. Nothing can be shown on screen this early, so the result
+    // is reported further down.
+    cj_psram_setup();
 
     // Power the USB-A ports FIRST, and unconditionally -- not inside
     // usb_host_prepare(), and not behind ENABLE_USB_HOST.
@@ -675,17 +743,58 @@ int main(void) {
     if (!cv_init(bios_rom, bios_len))
         fatal(6, "Emulator init failed.", "Check COLECO.BIN.");
 
+#if ENABLE_MEGACART
+    // Before any cartridge is chosen, so an oversized one can be refused with
+    // a clear message instead of failing halfway through loading.
+    if (!cj_psram_ready()) {
+        // Not fatal: standard cartridges are unaffected. Reported here rather
+        // than where it happens, because that is before the display exists.
+        // Fatal now: every cartridge is loaded into PSRAM, so without it
+        // there is nothing this can go on to do.
+        fatal(9, "PSRAM did not start.",
+              "No cartridge can be loaded without it.");
+    }
+#endif
+
     blink(5);                       // SD mounted, BIOS loaded
 
     // --- Cartridge shield takes priority over the SD card ----------------
 #if ENABLE_CART_READER
+#if ENABLE_MEGACART
+    // A megabyte through the shield takes a while; show how far it has got.
+    auto cart_dump_progress = [](uint32_t done, uint32_t total) {
+        char msg[48];
+        snprintf(msg, sizeof(msg), "Reading cartridge... %lu of %lu KB",
+                 (unsigned long)(done / 1024), (unsigned long)(total / 1024));
+        menu_message("CARTRIDGE DETECTED", msg, nullptr, false);
+    };
+#endif
+
     menu_message("ADAFRUIT COLECOJAM", "Checking cartridge slot...", nullptr, false);
     if (cart_present()) {
         menu_message("CARTRIDGE DETECTED", "Reading cartridge ROM...", nullptr, false);
-        cart_len = cart_read(cart_rom, sizeof(cart_rom));
+        const uint8_t *cart_base = cart_buffer();
+
+#if ENABLE_MEGACART
+        // Try a bank-switched read first. It returns 0 for an ordinary
+        // cartridge, which then loads into SRAM exactly as before.
+        if (cj_psram_ready()) {
+            menu_message("CARTRIDGE DETECTED", "Checking for bank switching...",
+                         nullptr, false);
+            cart_len = cart_read_banked(cj_psram_base(), cj_psram_bytes(),
+                                        cart_dump_progress);
+            if (cart_len > 0) {
+                cart_base = cj_psram_base();
+                printf("Cartridge: %lu KB banked, read into PSRAM\n",
+                       (unsigned long)(cart_len / 1024));
+            }
+        }
+        if (cart_len == 0)
+#endif
+        cart_len = cart_read(cart_buffer(), cart_buffer_size());
         printf("Cartridge read: %lu bytes\n", (unsigned long)cart_len);
         if (cart_len >= 0x2000) {
-            cv_load_rom(cart_rom, cart_len);
+            cv_load_rom(cart_base, cart_len);
             cv_reset();
             cart_played = true;
             run_emulator();
@@ -752,15 +861,58 @@ int main(void) {
         wait_for_button_release();
 
         menu_message("LOADING", path, nullptr, false);
-        cart_len = load_file(path, cart_rom, sizeof(cart_rom));
-        if (cart_len == 0)
+
+        // Anything over 32 KB is a MegaCart and goes to PSRAM; the rest loads
+        // into the SRAM buffer exactly as before.
+        const uint32_t fsize = file_size(path);
+        const uint8_t *rom_base = cart_buffer();
+        (void)fsize;                 // only consulted when MegaCart is built
+
+        if (fsize > MEGACART_MAX_BYTES)
+            fatal(8, "Cartridge is larger than 1 MB.", path);
+        if (!cj_psram_ready())
+            fatal(8, "PSRAM did not start; no cartridge can be loaded.", path);
+
+        cart_len = load_file_psram(path, fsize);
+        if (cart_len != fsize)
             fatal(8, "Could not read that ROM file.", path);
+        printf("Cartridge: %lu KB in PSRAM\n", (unsigned long)(cart_len / 1024));
         printf("Starting %s (%lu bytes)\n", path, (unsigned long)cart_len);
 
         // cv_reset() clears RAM, the VDP, the PSG and the CPU, so the new game
         // starts exactly as it would from power-on -- nothing carries across
         // from the previous one.
-        cv_load_rom(cart_rom, cart_len);
+        cv_load_rom(rom_base, cart_len);
+
+#if SHOW_CART_INFO
+        // What the loader actually concluded, on screen. A ROM that is not a
+        // whole power-of-two number of 16 KB banks is not a MegaCart and gets
+        // truncated to 32 KB, which looks from the outside exactly like a
+        // MegaCart that failed to work.
+        {
+            const uint32_t banks = cv_rom_banks();
+            char l1[48], l2[48];
+            snprintf(l1, sizeof(l1), "%lu KB in PSRAM",
+                     (unsigned long)(cart_len / 1024));
+            // The first bytes of bank 0 AND of the last bank. A MegaCart
+            // carries its AA 55 header at the start of one or the other, and
+            // showing both says whether the ROM lacks a header or whether what
+            // we loaded simply is not what is in the file.
+            if (banks) {
+                const uint8_t *last = rom_base + (banks - 1) * 0x4000u;
+                snprintf(l2, sizeof(l2), "b0 %02X %02X %02X  b%lu %02X %02X %02X",
+                         rom_base[0], rom_base[1], rom_base[2],
+                         (unsigned long)(banks - 1),
+                         last[0], last[1], last[2]);
+            } else {
+                snprintf(l2, sizeof(l2), "not banked, hdr %02X %02X %02X",
+                         rom_base[0], rom_base[1], rom_base[2]);
+            }
+            menu_message("CARTRIDGE", l1, l2, false);
+            sleep_ms(CART_INFO_MS);
+        }
+#endif
+
         cv_reset();
         run_emulator();
     }

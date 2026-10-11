@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 #include <stdint.h>
+// For ENABLE_MEGACART, used below.
+#include "config.h"
 #include <stdbool.h>
 
 // True when a cartridge is seated and its header signature checks out.
@@ -20,3 +22,16 @@ int cart_probe_bytes(uint8_t *dst, int max);
 // Which chip select carried that header, or -1 if none did. A value other
 // than 0 means the chip select ordering differs from the assumed one.
 int cart_header_bank(void);
+
+#if ENABLE_MEGACART
+// Progress callback for a long dump: called with bytes done and the total.
+typedef void (*cart_progress_fn)(uint32_t done, uint32_t total);
+
+// Dump a bank-switched cartridge into `dst`, which must be large enough for
+// the whole ROM -- in practice the PSRAM buffer. Returns the number of bytes
+// read, or 0 if the cartridge is not bank-switched (use cart_read() for that).
+//
+// The banking is on the cartridge, so this drives the bank select itself,
+// discovers how many banks there are, and reads each one.
+uint32_t cart_read_banked(uint8_t *dst, uint32_t max_len, cart_progress_fn progress);
+#endif

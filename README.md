@@ -57,6 +57,118 @@ Switching back to `AUDIO_SINK_CODEC` with `VIDEO_DRIVER_HSTX` restores the
 previous arrangement exactly: 240 MHz, `clk_hstx` from a retuned `pll_usb`, and
 USB host on core 1.
 
+## MegaCart
+
+`ENABLE_MEGACART` plays cartridges larger than 32 KB, up to the format's 1 MB
+maximum.
+
+```
+0x8000-0xBFFF   the last bank of the ROM, always fixed
+0xC000-0xFFFF   switchable 16 KB bank
+```
+
+Note which way round that is: the **fixed** half is the lower one. That is why
+a MegaCart carries its `AA 55` header at the start of its *last* bank -- the
+last bank is what the BIOS sees at 0x8000.
+
+The bank is chosen by **reading** 0xFFC0 + n, not by writing. Those addresses
+sit inside the switchable window itself, so an ordinary instruction fetch there
+switches banks as a side effect, which is how the hardware behaves and what
+games depend on.
+
+**Every** cartridge is held in the board's 8 MB PSRAM, bank-switched or not.
+PSRAM is memory-mapped, so the emulator reads cartridge bytes from it at a
+pointer. Only core 0 touches it, and core 1's video code and framebuffer are
+both in SRAM, so HDMI timing is unaffected.
+
+Ordinary cartridges used to load into a 32 KB SRAM buffer while only MegaCarts
+went to PSRAM. Keeping both spent 32 KB of the scarcest resource on the board
+on a copy of something PSRAM holds comfortably, and that 32 KB is what lets the
+title chime and the Super Game Module coexist. The cost is that PSRAM is now
+required to load anything at all, which is reported plainly at boot if it ever
+fails.
+
+Nothing here initialises the chip: the SDK does that during runtime init from
+`PICO_PSRAM_SIZE_BYTES` and `PICO_PSRAM_CS_PIN` in the Fruit Jam board header,
+before `main()` runs.
+
+**The PSRAM has to be re-timed after the clock change.** The SDK sets the QMI
+divider during runtime init, from whatever clk_sys is at that moment, and
+`main()` later raises it to 252 MHz for the HDMI output -- which doubles the
+PSRAM clock past the chip's 133 MHz limit. The failure is not obvious: most
+reads are fine and the occasional one comes back with a bit flipped, so a ROM
+loads looking almost right and the machine refuses to start it.
+`psram_configure_params()` and `psram_reinitialize()` are called immediately
+after the clock is set and before core 1 exists, since re-initialising reaches
+into the QMI.
+
+The ROM is read and written through the PSRAM memory window directly, rather
+than by reserving a variable in it, which keeps the linker out of it entirely.
+The window address is architectural, but it is not taken on trust: the SDK's
+`psram_check_address()` is asked about both ends of the range, and a pattern is
+written and read back at each end. If any of that fails, MegaCart support
+switches itself off with a message rather than reading from somewhere
+arbitrary. If that fails, oversized cartridges are refused with a message
+rather than loading as corrupt data, which would otherwise look like a bad ROM
+dump rather than a hardware fault.
+
+Nothing has to guess which bank boots: the last bank is permanently at 0x8000,
+so a cartridge's header is visible from the start whatever the switchable
+window holds. The switchable window begins at bank 0 and games set it
+themselves.
+
+### MegaCart cartridges in the shield
+
+Bank-switched cartridges can be read through the shield as well as from SD.
+The banking is on the cartridge, so the reader drives it: selecting bank n is a
+read of 0xFFC0+n, which the shield reaches as chip select 3 at offset 0x1FC0+n.
+
+The size is discovered rather than assumed. Selecting a bank beyond the real
+count wraps, because the cartridge masks the select with its own bank count, so
+the first count at which a bank reads back identical to bank 0 is the real
+count. If bank 1 already matches bank 0 there is no banking hardware and it is
+read as an ordinary cartridge.
+
+One limitation worth knowing: the select addresses live inside the switchable
+window, so the last 64 bytes of a bank cannot be read without changing bank.
+They are dumped as 0xFF for every bank except the last, which is readable in
+full through the fixed window at 0x8000. No game can keep code there -- it
+could not execute it without switching away mid-instruction.
+
+A megabyte takes around 17 seconds to read, with progress shown on screen.
+
+## Super Game Module
+
+`ENABLE_SGM` adds the Opcode Games expansion: 32 KB of RAM and an AY-3-8910
+sound chip, on top of the standard machine rather than instead of it.
+
+| | |
+|---|---|
+| port 0x53 bit 0 | switches 24 KB in at 0x2000-0x7FFF |
+| port 0x7F bit 1 | **clear** maps 8 KB over the BIOS at 0x0000; set restores the BIOS |
+| ports 0x50/0x51 | AY register select and write |
+| port 0x52 | AY register read |
+
+Both windows start switched out and the AY stays silent until a game writes to
+it, so a standard cartridge sees exactly the machine it always did -- verified
+by comparing the whole 64 KB address space against the pre-SGM map. With the
+upper window in, 0x6000-0x7FFF becomes contiguous RAM rather than the base
+machine's 1 KB mirrored eight times. A reset switches both windows out but
+leaves the RAM contents alone, as the hardware does.
+
+The AY masks each register to its real width -- write 0xFF to register 1 and
+it reads back 0x0F -- and its two unconnected I/O ports read 0xFF. That is not
+pedantry: a game detects the module by writing to an AY register and reading it
+back, and a chip that returns whatever was written is indistinguishable from no
+chip at all.
+
+Note the inverted sense of port 0x7F against port 0x53: bit 1 **clear** enables
+the RAM. Reading it the other way round boots to a dead machine.
+
+The module's 32 KB of RAM used to rule out the title chime. Moving cartridges
+out of SRAM freed 32 KB, which covers both, so they are now on together by
+default.
+
 ## Diagnostics
 
 Every bring-up problem in this project was found by measurement rather than

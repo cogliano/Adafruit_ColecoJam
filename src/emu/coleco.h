@@ -66,3 +66,16 @@ void cv_run_scanline(uint16_t *line_dest);
 // Convenience: run a whole frame into a 256x192 RGB565 buffer with the given
 // stride in pixels.
 void cv_run_frame(uint16_t *fb, int stride);
+
+// Render `count` mono samples of machine audio: the SN76489 always, with the
+// Super Game Module's AY-3-8910 mixed in when a game has used it.
+void cv_render_audio(int16_t *buf, int count);
+
+// MegaCart state, for reporting what a cartridge was understood to be.
+// cv_rom_banks() is 0 when the ROM is not banked.
+uint32_t cv_rom_banks(void);
+uint32_t cv_rom_boot_bank(void);
+
+// The bank currently mapped at 0x8000, for diagnosing a MegaCart that starts
+// and then loses its way.
+uint32_t cv_rom_cur_bank(void);

@@ -63,12 +63,14 @@ add_executable(colecojam
     src/emu/z80.cpp
     src/emu/tms9918.cpp
     src/emu/sn76489.cpp
+    src/emu/ay8910.cpp
     src/emu/coleco.cpp
 
     src/hw/video_hstx.cpp
     src/hw/video_hdmi.cpp
     src/hw/audio.cpp
     src/hw/sfx.cpp
+    src/hw/psram.cpp
     src/hw/sdcard.cpp
     src/hw/usb_host.cpp
     src/hw/gamepad.cpp
@@ -163,6 +165,14 @@ target_link_libraries(colecojam
     pico_bootrom
     hardware_dma
     hardware_pio
+    # PSRAM holds MegaCart ROMs. The SDK brings the chip up during runtime init
+    # from PICO_PSRAM_SIZE_BYTES and PICO_PSRAM_CS_PIN in the Fruit Jam board
+    # header, so nothing calls an init function -- this library is linked for
+    # psram_is_available() and psram_check_address().
+    #
+    # src/hw/psram.cpp uses the PSRAM memory window directly rather than
+    # placing a variable in it, so no linker region is needed.
+    hardware_psram
     hardware_spi
     hardware_i2c
     hardware_irq
@@ -265,6 +275,14 @@ set_source_files_properties(
     ${PIO_USB_DIR}/src/pio_usb_device.c
     ${PIO_USB_DIR}/src/usb_crc.c
     PROPERTIES COMPILE_OPTIONS "-Wno-attributes")
+
+# Upstream xinput_host.c leaves the rhport parameter unused in several of the
+# class-driver callbacks, whose signatures are fixed by TinyUSB. Suppressed for
+# that file alone rather than project-wide, so the warning still does its job
+# on our own code.
+set_source_files_properties(
+    ${XINPUT_DIR}/xinput_host.c
+    PROPERTIES COMPILE_OPTIONS "-Wno-unused-parameter")
 
 # --- TinyUSB's PIO-USB host controller driver ------------------------------
 # Setting CFG_TUH_RPI_PIO_USB=1 makes TinyUSB's native hcd_rp2040.c compile

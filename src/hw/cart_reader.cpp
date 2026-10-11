@@ -273,6 +273,94 @@ int cart_probe_bytes(uint8_t *dst, int max) {
     return n;
 }
 
+#if ENABLE_MEGACART
+// --- MegaCart dumping ------------------------------------------------------
+//
+// A MegaCart does its banking on the cartridge, so reading one means driving
+// the bank select ourselves:
+//
+//   0x8000-0xBFFF   the last bank, fixed          CS0 and CS1
+//   0xC000-0xFFFF   the switchable bank           CS2 and CS3
+//   0xFFC0 + n      selecting bank n is a READ    CS3 at offset 0x1FC0 + n
+//
+// Note the consequence of that last line: the select addresses live inside the
+// switchable window, so the final 64 bytes of a bank cannot be read without
+// changing bank. They are dumped as 0xFF for every bank except the last, which
+// is readable in full through the fixed window. No game can place code there
+// -- it could not execute it without switching away mid-instruction.
+
+#define BANK_BYTES   0x4000u
+#define SEL_BASE     0x1FC0u          // 0xFFC0 within the CS3 window
+#define SEL_COUNT    0x40u            // 64 select addresses
+
+// Point the switchable window at bank n.
+static inline void cart_select_bank(uint32_t n) {
+    (void)cart_read_byte(3, (uint16_t)(SEL_BASE + (n & (SEL_COUNT - 1))));
+}
+
+// Checksum a bank, avoiding the select region entirely.
+static uint32_t cart_bank_hash(uint32_t bank) {
+    cart_select_bank(bank);
+    uint32_t h = 2166136261u;
+    for (uint16_t off = 0; off < 0x2000; off += 64) {       // CS2 half
+        h = (h ^ cart_read_byte(2, off)) * 16777619u;
+    }
+    for (uint16_t off = 0; off < 0x1F00; off += 64) {       // CS3 half, clear
+        h = (h ^ cart_read_byte(3, off)) * 16777619u;       // of the selects
+    }
+    return h;
+}
+
+// How many 16 KB banks the cartridge has, or 0 if it is not bank-switched.
+//
+// Selecting a bank beyond the real count wraps, because the cartridge masks
+// the select with its own bank count. So the first count at which bank c reads
+// back the same as bank 0 is the real count. If bank 1 already matches bank 0
+// there is no banking hardware at all.
+static uint32_t cart_detect_banks(void) {
+    const uint32_t h0 = cart_bank_hash(0);
+    if (cart_bank_hash(1) == h0) return 0;                  // not banked
+
+    for (uint32_t c = 2; c <= 64; c <<= 1) {
+        if (cart_bank_hash(c) == h0) return c;
+    }
+    return 64;                                              // the format's max
+}
+
+uint32_t cart_read_banked(uint8_t *dst, uint32_t max_len,
+                          cart_progress_fn progress) {
+    cart_gpio_init();
+
+    const uint32_t banks = cart_detect_banks();
+    if (banks == 0) return 0;                               // caller uses cart_read()
+
+    const uint32_t total = banks * BANK_BYTES;
+    if (total > max_len) return 0;
+
+    for (uint32_t b = 0; b < banks; b++) {
+        uint8_t *out = dst + b * BANK_BYTES;
+
+        if (b == banks - 1) {
+            // The last bank is permanently at 0x8000, so it can be read
+            // whole -- including the bytes that are unreachable elsewhere.
+            for (uint16_t off = 0; off < 0x2000; off++) out[off] = cart_read_byte(0, off);
+            for (uint16_t off = 0; off < 0x2000; off++) out[0x2000 + off] = cart_read_byte(1, off);
+        } else {
+            cart_select_bank(b);
+            for (uint16_t off = 0; off < 0x2000; off++) out[off] = cart_read_byte(2, off);
+            for (uint16_t off = 0; off < 0x1FC0; off++) out[0x2000 + off] = cart_read_byte(3, off);
+            // The select region: unreadable for this bank.
+            for (uint16_t off = 0x1FC0; off < 0x2000; off++) out[0x2000 + off] = 0xFF;
+        }
+
+        if (progress) progress((b + 1) * BANK_BYTES, total);
+    }
+
+    cart_gpio_release();
+    return total;
+}
+#endif  // ENABLE_MEGACART
+
 uint32_t cart_read(uint8_t *dst, uint32_t max_len) {
     cart_gpio_init();
 
@@ -330,5 +418,8 @@ bool     cart_present(void) { return false; }
 uint32_t cart_read(uint8_t *dst, uint32_t max_len) { (void)dst; (void)max_len; return 0; }
 int      cart_probe_bytes(uint8_t *dst, int max)   { (void)dst; (void)max; return 0; }
 int      cart_header_bank(void) { return -1; }
+#if ENABLE_MEGACART
+uint32_t cart_read_banked(uint8_t *, uint32_t, cart_progress_fn) { return 0; }
+#endif
 
 #endif

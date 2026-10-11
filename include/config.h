@@ -177,6 +177,44 @@
 // Cartridge reader shield
 // ---------------------------------------------------------------------------
 // Set to 0 to compile the shield support out entirely.
+// ---------------------------------------------------------------------------
+// Super Game Module.
+//
+// Adds 32 KB of RAM (8 KB over the BIOS at 0x0000, 24 KB at 0x2000-0x7FFF) and
+// an AY-3-8910 sound chip. Standard cartridges are unaffected: the extra RAM
+// stays switched out until a game asks for it, and the AY stays silent until
+// one writes to it.
+//
+// The 32 KB is statically allocated. This used to rule out the title chime,
+// but cartridges now load into PSRAM instead of a 32 KB SRAM buffer, and that
+// 32 KB covers both.
+// ---------------------------------------------------------------------------
+#define ENABLE_SGM          1
+
+// ---------------------------------------------------------------------------
+// MegaCart bank switching, for cartridges larger than 32 KB.
+//
+// The ROM is held in the board's 8 MB PSRAM, not SRAM -- a MegaCart runs to
+// 1 MB and there is nowhere near that spare. Only core 0 reads it, and core 1's
+// video code and framebuffer are both in SRAM, so the HDMI timing is
+// unaffected.
+//
+// Standard cartridges are untouched: they stay in the 32 KB SRAM buffer and
+// never go near PSRAM, so this costs nothing when it is not used.
+// ---------------------------------------------------------------------------
+#define ENABLE_MEGACART     1
+
+// Size of the PSRAM cartridge buffer, and so the largest cartridge accepted.
+// 1 MB is the MegaCart format's maximum. Every cartridge lives here, not just
+// bank-switched ones, which is what freed the SRAM the title chime needs.
+#define MEGACART_MAX_BYTES  (1024u * 1024u)
+
+// Show what the loader made of a cartridge before starting it: size, where it
+// was put, how many banks, which bank boots and the header bytes it found.
+// Held on screen for CART_INFO_MS so it can be read without a serial console.
+#define SHOW_CART_INFO      0
+#define CART_INFO_MS        3000
+
 #define ENABLE_CART_READER  1
 
 // --- Cartridge reader shield -----------------------------------------------
@@ -529,7 +567,7 @@
 // perfectly matched an older decoder, and it took a full round of analysis to
 // realise the source and the firmware had diverged. Bump this whenever you
 // change something you intend to test.
-#define ACJ_BUILD_ID        "version 1.7"
+#define ACJ_BUILD_ID        "version 2.0b1"
 
 // ---------------------------------------------------------------------------
 // USB clock test mode overrides. Placed last so they win over the settings
