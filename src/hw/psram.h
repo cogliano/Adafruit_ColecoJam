@@ -20,3 +20,9 @@ bool cj_psram_setup(void);
 uint8_t *cj_psram_base(void);
 size_t   cj_psram_bytes(void);
 bool     cj_psram_ready(void);
+
+// Scratch past the cartridge buffer, for anything else that would otherwise
+// cost SRAM -- currently the EEPROM. CJ_PSRAM_SCRATCH_BYTES is verified at
+// startup along with the cartridge area.
+#define CJ_PSRAM_SCRATCH_BYTES  (64u * 1024u)
+uint8_t *cj_psram_scratch(void);

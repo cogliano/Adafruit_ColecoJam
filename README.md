@@ -137,6 +137,48 @@ could not execute it without switching away mid-instruction.
 
 A megabyte takes around 17 seconds to read, with progress shown on screen.
 
+## Activision PCB and saved scores
+
+`ENABLE_ACTIVISION` plays the cartridges that carry a serial EEPROM -- Boxxle,
+Black Onyx, Arcomage, Jewel Panic -- and keeps what they save.
+
+```
+0x8000-0xBFFF   bank 0, fixed
+0xC000-0xFFFF   switchable bank
+write 0xFF90 / 0xFFA0 / 0xFFB0   select bank 1 / 2 / 3
+write 0xFFC0 / 0xFFD0            SCL low / high
+write 0xFFE0 / 0xFFF0            SDA low / high
+read  0xFF80                     the SDA line
+```
+
+Mapping documented by kevtris on
+[AtariAge](https://forums.atariage.com/topic/327053-activision-pcb-bank-switching-and-eeprom/).
+
+This is a different mapper from MegaCart and 64 KB ROMs come in both kinds, so
+they are told apart by where the header sits: bank 0 is fixed at 0x8000 on an
+Activision PCB, putting its header at offset 0, while a MegaCart keeps its
+header at the start of its last bank.
+
+The chip's contents live in PSRAM, past the cartridge buffer, not in SRAM. A
+24C256 is 32 KB and a bit-banged bus touches it a few bytes at a time, so
+spending 32 KB of the board's scarcest memory on it would be the wrong trade --
+it was briefly declared as a plain array and that alone overflowed SRAM.
+
+The EEPROM is bit-banged I2C, so the chip is modelled at the level of the two
+bus lines rather than bytes. Both parts are supported and they differ in more
+than size: a 24C08 takes a single address byte and carries the top address bits
+in the device-address byte, a 24C256 takes two.
+
+Contents are kept in a file beside the ROM, same name with `.sav`. The file's
+size records which chip the game has, so `EEPROM_DEFAULT_BYTES` only matters
+the first time a game is played. It is written on the way back to the browser,
+which is the only way out of a game, and only when the game actually changed
+something.
+
+**SD-loaded games only.** A cartridge in the shield has its own real EEPROM on
+board; the chip is still emulated so the game runs, but no save file is
+written, because it would be a record of the wrong chip's contents.
+
 ## Super Game Module
 
 `ENABLE_SGM` adds the Opcode Games expansion: 32 KB of RAM and an AY-3-8910

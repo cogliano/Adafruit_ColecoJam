@@ -67,11 +67,12 @@ bool cj_psram_setup(void) {
     }
     // Both ends must be backed by real memory, which also confirms the window
     // address is where we think it is.
+    const size_t need = MEGACART_MAX_BYTES + CJ_PSRAM_SCRATCH_BYTES;
     if (!psram_check_address(PSRAM_WINDOW) ||
-        !psram_check_address(PSRAM_WINDOW + MEGACART_MAX_BYTES - 1)) {
+        !psram_check_address(PSRAM_WINDOW + need - 1)) {
         printf("PSRAM: %u KB present, too small for a %u KB cartridge buffer\n",
                (unsigned)(psram_get_size() / 1024),
-               (unsigned)(MEGACART_MAX_BYTES / 1024));
+               (unsigned)(need / 1024));
         return false;
     }
 
@@ -84,7 +85,8 @@ bool cj_psram_setup(void) {
     // to catch it and still only a few milliseconds.
     uint8_t *const mem = PSRAM_WINDOW;
     const size_t   span = 32u * 1024u;
-    const size_t   spots[2] = { 0, MEGACART_MAX_BYTES - span };
+    const size_t   spots[2] = { 0, MEGACART_MAX_BYTES
+                                   + CJ_PSRAM_SCRATCH_BYTES - span };
 
     for (int s2 = 0; s2 < 2; s2++) {
         uint32_t lcg = 0x12345678u + (uint32_t)s2;
@@ -114,5 +116,8 @@ bool cj_psram_setup(void) {
 }
 
 uint8_t *cj_psram_base(void)  { return ready ? PSRAM_WINDOW : nullptr; }
+uint8_t *cj_psram_scratch(void) {
+    return ready ? (PSRAM_WINDOW + MEGACART_MAX_BYTES) : nullptr;
+}
 size_t   cj_psram_bytes(void) { return ready ? MEGACART_MAX_BYTES : 0; }
 bool     cj_psram_ready(void) { return ready; }

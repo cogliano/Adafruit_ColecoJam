@@ -204,6 +204,33 @@
 // ---------------------------------------------------------------------------
 #define ENABLE_MEGACART     1
 
+// ---------------------------------------------------------------------------
+// Activision PCB cartridges, which carry a serial EEPROM for saved scores.
+//
+// A different mapper from MegaCart, and 64 KB ROMs come in both kinds. They
+// are told apart by where the cartridge header sits: bank 0 is fixed at
+// 0x8000 on an Activision PCB, so its header is at offset 0, while a
+// MegaCart's is at the start of its last bank.
+//
+//   0x8000-0xBFFF   bank 0, fixed        write 0xFFC0 / 0xFFD0  SCL low / high
+//   0xC000-0xFFFF   switchable bank      write 0xFFE0 / 0xFFF0  SDA low / high
+//   write 0xFF90/0xFFA0/0xFFB0           read  0xFF80           SDA line
+//     select bank 1 / 2 / 3
+//
+// Mapping documented by kevtris:
+// https://forums.atariage.com/topic/327053-activision-pcb-bank-switching-and-eeprom/
+//
+// EEPROM contents are kept in a file beside the ROM with a .sav extension.
+// SD-loaded games only: a cartridge in the shield has its own real EEPROM, and
+// writing a save file for it would be writing down the wrong chip's contents.
+// ---------------------------------------------------------------------------
+#define ENABLE_ACTIVISION   1
+
+// Which chip a game is assumed to have. Black Onyx uses a small one, Boxxle a
+// 24C256. An existing .sav file overrides this, so changing it once per game
+// is enough. EEPROM_24C08_BYTES or EEPROM_24C256_BYTES.
+#define EEPROM_DEFAULT_BYTES  EEPROM_24C256_BYTES
+
 // Size of the PSRAM cartridge buffer, and so the largest cartridge accepted.
 // 1 MB is the MegaCart format's maximum. Every cartridge lives here, not just
 // bank-switched ones, which is what freed the SRAM the title chime needs.
@@ -539,7 +566,7 @@
 // When the saver starts, the menu fades to black around the logo over this
 // many milliseconds, and then everything holds still for the pause below
 // before the logo begins to move. Either may be 0 to skip that stage.
-#define MENU_SAVER_FADE_MS    1500
+#define MENU_SAVER_FADE_MS    500
 #define MENU_SAVER_PAUSE_MS   500
 
 // Seconds for the logo to travel from the top of the screen to the bottom.
@@ -567,7 +594,7 @@
 // perfectly matched an older decoder, and it took a full round of analysis to
 // realise the source and the firmware had diverged. Bump this whenever you
 // change something you intend to test.
-#define ACJ_BUILD_ID        "version 2.0b1"
+#define ACJ_BUILD_ID        "build 100"
 
 // ---------------------------------------------------------------------------
 // USB clock test mode overrides. Placed last so they win over the settings

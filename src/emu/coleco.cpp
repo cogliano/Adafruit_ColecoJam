@@ -24,6 +24,7 @@
 #include "tms9918.h"
 #include "sn76489.h"
 #include "ay8910.h"
+#include "eeprom24.h"
 #include <string.h>
 
 #ifdef PICO_ON_DEVICE
@@ -60,7 +61,16 @@ static uint32_t       cv_bank_mask  = 0;        // banks - 1
 static const uint8_t *cv_bank_ptr   = nullptr;  // what 0x8000 currently sees
 static const uint8_t *cv_fixed_ptr  = nullptr;  // what 0xC000 always sees
 static uint8_t        cv_bank_first = 0;        // bank selected at reset
+#endif
 
+#if ENABLE_ACTIVISION
+// Activision PCB: bank 0 fixed at 0x8000, a switchable bank at 0xC000, and a
+// serial EEPROM bit-banged through write hotspots in the top page.
+static bool           cv_activision = false;
+static const uint8_t *cv_act_bank   = nullptr;   // what 0xC000 sees
+#endif
+
+#if ENABLE_MEGACART
 static inline void cv_set_bank(uint8_t bank) {
     bank &= (uint8_t)cv_bank_mask;
     cv_bank_ptr = cv_rom + (uint32_t)bank * 0x4000u;
@@ -157,6 +167,18 @@ uint8_t HOT(cv_bus_read)(uint16_t addr) {
 #endif
         return cv_ram[addr & (CV_RAM_SIZE - 1)];
     }
+#if ENABLE_ACTIVISION
+    if (cv_activision) {
+        if (addr < 0xC000) return cv_rom[addr - 0x8000];   // bank 0, fixed
+
+        // The one address that reports the EEPROM: the cartridge returns a
+        // byte that differs by the state of the data line, so the game reads
+        // the line as bit 0.
+        if (addr == 0xFF80) return eeprom_get_sda() ? 0x01 : 0x00;
+
+        return cv_act_bank[addr - 0xC000];
+    }
+#endif
 #if ENABLE_MEGACART
     if (cv_bank_mask) {
         if (addr < 0xC000) return cv_fixed_ptr[addr - 0x8000];
@@ -173,6 +195,22 @@ uint8_t HOT(cv_bus_read)(uint16_t addr) {
 }
 
 void HOT(cv_bus_write)(uint16_t addr, uint8_t value) {
+#if ENABLE_ACTIVISION
+    // Hotspots in the top page. These are WRITES, and the value does not
+    // matter -- the address alone carries the meaning.
+    if (cv_activision && addr >= 0xFF90) {
+        switch (addr & 0xFFF0) {
+        case 0xFF90: cv_act_bank = cv_rom + 1 * 0x4000u; return;
+        case 0xFFA0: cv_act_bank = cv_rom + 2 * 0x4000u; return;
+        case 0xFFB0: cv_act_bank = cv_rom + 3 * 0x4000u; return;
+        case 0xFFC0: eeprom_set_scl(false); return;
+        case 0xFFD0: eeprom_set_scl(true);  return;
+        case 0xFFE0: eeprom_set_sda(false); return;
+        case 0xFFF0: eeprom_set_sda(true);  return;
+        default: break;
+        }
+    }
+#endif
 #if ENABLE_SGM
     if (addr < 0x2000) {
         if (sgm_lower) sgm_ram[addr] = value;
@@ -301,6 +339,21 @@ bool cv_init(const uint8_t *bios, uint32_t bios_len) {
 void cv_load_rom(const uint8_t *rom, uint32_t len) {
     cv_rom = rom;
 
+#if ENABLE_ACTIVISION
+    cv_activision = false;
+
+    // An Activision PCB is 64 KB with its header at offset 0, because bank 0
+    // sits at 0x8000 where the BIOS looks. A 64 KB MegaCart keeps its header
+    // at the start of its LAST bank instead, so the two never look alike.
+    if (len == 0x10000u &&
+        ((rom[0] == 0xAA && rom[1] == 0x55) || (rom[0] == 0x55 && rom[1] == 0xAA))) {
+        cv_activision = true;
+        cv_act_bank   = rom + 0x4000u;      // bank 1 until the game says
+        cv_rom_len    = len;
+        return;
+    }
+#endif
+
 #if ENABLE_MEGACART
     cv_bank_mask = 0;
 
@@ -334,6 +387,9 @@ void cv_reset(void) {
     cv_pad[0].keypad = CV_KEY_NONE;
     cv_pad[1].keypad = CV_KEY_NONE;
     keypad_mode = false;
+#if ENABLE_ACTIVISION
+    if (cv_activision) { cv_act_bank = cv_rom + 0x4000u; eeprom_reset(); }
+#endif
 #if ENABLE_MEGACART
     if (cv_bank_mask) cv_set_bank(cv_bank_first);
 #endif

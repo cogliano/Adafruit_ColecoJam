@@ -64,6 +64,7 @@ add_executable(colecojam
     src/emu/tms9918.cpp
     src/emu/sn76489.cpp
     src/emu/ay8910.cpp
+    src/emu/eeprom24.cpp
     src/emu/coleco.cpp
 
     src/hw/video_hstx.cpp

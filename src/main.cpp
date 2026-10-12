@@ -26,6 +26,7 @@
 
 #include "config.h"
 #include "emu/coleco.h"
+#include "emu/eeprom24.h"
 #include "emu/tms9918.h"
 #include "emu/sn76489.h"
 #include "emu/z80.h"
@@ -313,6 +314,69 @@ static uint32_t file_size(const char *path) {
     if (f_stat(path, &fno) != FR_OK) return 0;
     return (uint32_t)fno.fsize;
 }
+
+#if ENABLE_ACTIVISION
+// --- EEPROM save files -----------------------------------------------------
+//
+// Beside the ROM, same name with .sav. Only for games loaded from the SD card:
+// a cartridge in the shield has its own real EEPROM on board, and writing a
+// save file for it would be recording the wrong chip's contents.
+static char sav_path[256];
+
+static void sav_path_for(const char *rom_path) {
+    sav_path[0] = '\0';
+    if (!rom_path) return;
+
+    const size_t n = strlen(rom_path);
+    if (n + 5 >= sizeof(sav_path)) return;      // no room for the extension
+
+    strcpy(sav_path, rom_path);
+    char *dot = strrchr(sav_path, '.');
+    const char *slash = strrchr(sav_path, '/');
+    if (dot && (!slash || dot > slash)) *dot = '\0';   // only a real extension
+    strcat(sav_path, ".sav");
+}
+
+// Load a save file, sizing the chip from the file when one exists. That makes
+// the file itself the record of which EEPROM a game has, so EEPROM_DEFAULT_BYTES
+// only matters the first time.
+static void eeprom_load(const char *rom_path) {
+    sav_path_for(rom_path);
+    eeprom_attach(EEPROM_DEFAULT_BYTES, cj_psram_scratch());
+    if (!sav_path[0] || !eeprom_size()) return;   // detached: nothing to load
+
+    FILINFO fno;
+    if (f_stat(sav_path, &fno) != FR_OK) return;
+
+    const uint32_t size = (fno.fsize == EEPROM_24C08_BYTES)
+                        ? EEPROM_24C08_BYTES : EEPROM_24C256_BYTES;
+    eeprom_attach(size, cj_psram_scratch());
+
+    FIL f;
+    if (f_open(&f, sav_path, FA_READ) != FR_OK) return;
+    UINT br = 0;
+    f_read(&f, eeprom_data(), size, &br);
+    f_close(&f);
+    eeprom_clear_dirty();
+    printf("EEPROM: loaded %u bytes from %s\n", (unsigned)br, sav_path);
+}
+
+// Write the save file, but only if the game actually changed something.
+static void eeprom_save(void) {
+    if (!sav_path[0] || !eeprom_size() || !eeprom_dirty()) return;
+
+    FIL f;
+    if (f_open(&f, sav_path, FA_WRITE | FA_CREATE_ALWAYS) != FR_OK) {
+        printf("EEPROM: could not write %s\n", sav_path);
+        return;
+    }
+    UINT bw = 0;
+    f_write(&f, eeprom_data(), eeprom_size(), &bw);
+    f_close(&f);
+    eeprom_clear_dirty();
+    printf("EEPROM: wrote %u bytes to %s\n", (unsigned)bw, sav_path);
+}
+#endif  // ENABLE_ACTIVISION
 
 // Load a cartridge into PSRAM.
 //
@@ -794,6 +858,12 @@ int main(void) {
         cart_len = cart_read(cart_buffer(), cart_buffer_size());
         printf("Cartridge read: %lu bytes\n", (unsigned long)cart_len);
         if (cart_len >= 0x2000) {
+    #if ENABLE_ACTIVISION
+            // Emulated so the game runs, but with no save file: the real
+            // cartridge has its own EEPROM and this is not its contents.
+            sav_path[0] = '\0';
+            eeprom_attach(EEPROM_DEFAULT_BYTES, cj_psram_scratch());
+#endif
             cv_load_rom(cart_base, cart_len);
             cv_reset();
             cart_played = true;
@@ -882,6 +952,9 @@ int main(void) {
         // cv_reset() clears RAM, the VDP, the PSG and the CPU, so the new game
         // starts exactly as it would from power-on -- nothing carries across
         // from the previous one.
+#if ENABLE_ACTIVISION
+        eeprom_load(path);
+#endif
         cv_load_rom(rom_base, cart_len);
 
 #if SHOW_CART_INFO
@@ -915,5 +988,11 @@ int main(void) {
 
         cv_reset();
         run_emulator();
+
+#if ENABLE_ACTIVISION
+        // On the way back to the browser, which is the only way out of a
+        // game, so there is no path that loses a score.
+        eeprom_save();
+#endif
     }
 }
