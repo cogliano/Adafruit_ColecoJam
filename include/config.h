@@ -315,6 +315,33 @@
 // Read every byte twice and require the two to agree, retrying a few times.
 // Costs roughly double the dump time -- still under a second for 32 KB -- and
 // turns a marginal read into a correct one rather than a silent corruption.
+// Trim a mirrored tail from the last chip of a cartridge.
+//
+// Chip selects are 8 KB, so a read is always a multiple of 8 KB -- but a
+// cartridge can finish with a smaller chip. A 4 KB chip in an 8 KB window has
+// A12 unconnected, so it answers to both halves and the second 4 KB read back
+// is the first one again. A 20 KB cartridge therefore reads as 24 KB with the
+// tail duplicated.
+//
+// Set to 0 to keep whatever the hardware returns.
+// How many times a bank that reads as one repeated value is re-tested before
+// it is accepted as an empty socket. An absent chip is uniform every time; a
+// bus that has not settled is not, so retrying separates the two.
+#define CART_EMPTY_RETRIES  3
+
+#define CART_TRIM_MIRROR    1
+
+// Trim an erased tail from the last chip of a cartridge.
+//
+// The other way a 20 KB cartridge is built: an 8 KB chip in the last socket
+// with only its lower half programmed, the rest left erased. That tail is not
+// a mirror of anything -- it is solid 0xFF, or 0x00 on a mask ROM -- so the
+// mirror trim above does not touch it and the read comes back 24 KB.
+//
+// Halved down to a 1 KB floor, the last bank only, and only while the whole
+// upper half is the same erased byte. Set to 0 to keep the full chip.
+#define CART_TRIM_BLANK     1
+
 #define CART_VERIFY_READS   1
 
 // Set to 0 to skip video_init() entirely. Everything still runs -- USB, SD,
@@ -566,7 +593,7 @@
 // When the saver starts, the menu fades to black around the logo over this
 // many milliseconds, and then everything holds still for the pause below
 // before the logo begins to move. Either may be 0 to skip that stage.
-#define MENU_SAVER_FADE_MS    500
+#define MENU_SAVER_FADE_MS    1500
 #define MENU_SAVER_PAUSE_MS   500
 
 // Seconds for the logo to travel from the top of the screen to the bottom.
@@ -594,7 +621,7 @@
 // perfectly matched an older decoder, and it took a full round of analysis to
 // realise the source and the firmware had diverged. Bump this whenever you
 // change something you intend to test.
-#define ACJ_BUILD_ID        "build 100"
+#define ACJ_BUILD_ID        "version 2.0b2"
 
 // ---------------------------------------------------------------------------
 // USB clock test mode overrides. Placed last so they win over the settings

@@ -332,7 +332,12 @@ uint32_t cart_read_banked(uint8_t *dst, uint32_t max_len,
     cart_gpio_init();
 
     const uint32_t banks = cart_detect_banks();
-    if (banks == 0) return 0;                               // caller uses cart_read()
+    if (banks == 0) {
+        // Not bank-switched. Release the pins rather than leaving them driven
+        // for cart_read() to re-initialise underneath itself.
+        cart_gpio_release();
+        return 0;
+    }
 
     const uint32_t total = banks * BANK_BYTES;
     if (total > max_len) return 0;
@@ -361,8 +366,127 @@ uint32_t cart_read_banked(uint8_t *dst, uint32_t max_len,
 }
 #endif  // ENABLE_MEGACART
 
+// What the last read made of the cartridge, so a wrong size can be looked at
+// rather than inferred. banks[] is one character per chip select in the order
+// they were read: P populated, B uniform but 0xFF/0x00 so treated as a blank
+// part of a real chip, U uniform and floating so treated as absent, '-' not
+// reached.
+CartReadStatus cart_status = { 0, 0, { '-', '-', '-', '-', 0 }, 0 };
+
+#if CART_TRIM_MIRROR
+// Shorten the last 8 KB if the chip there is smaller than its window.
+//
+// Chip selects are 8 KB wide, so a dump is always a multiple of 8 KB, but the
+// final chip need not be that big. A 4 KB chip has A12 unconnected and answers
+// to both halves of its window, so the second half of the read is the first
+// half again -- which is why a 20 KB cartridge comes back as 24 KB.
+//
+// Halving repeatedly also catches 2 KB and 1 KB chips. It stops at 1 KB: below
+// that the chance of a genuine ROM happening to repeat outweighs the chance of
+// a cartridge actually using a chip that small.
+//
+// Only the LAST bank is considered. An earlier bank reading as mirrored would
+// mean something stranger than a small chip, and trimming in the middle would
+// corrupt everything after it.
+static uint32_t trim_mirrored_tail(const uint8_t *dst, uint32_t total) {
+    if (total < 0x2000) return total;
+
+    const uint8_t *bank = dst + total - 0x2000;
+    uint32_t size = 0x2000;
+    while (size > 0x400 &&
+           memcmp(bank, bank + size / 2, size / 2) == 0) {
+        size /= 2;
+    }
+    return total - 0x2000 + size;
+}
+#endif
+
+#if CART_TRIM_BLANK
+// Shorten the last 8 KB if its upper part was never programmed.
+//
+// An erased tail is one repeated byte, 0xFF on an EPROM or 0x00 on a mask ROM.
+// Only those two count: any other repeated value is data, and a bank that
+// genuinely held, say, 4 KB of 0x20 would be real content.
+//
+// Last bank only, for the same reason as the mirror trim -- a blank stretch in
+// the middle of a cartridge is part of it, and cutting there would move
+// everything after.
+static uint32_t trim_blank_tail(const uint8_t *dst, uint32_t total) {
+    if (total < 0x2000) return total;
+
+    const uint8_t *bank = dst + total - 0x2000;
+    uint32_t size = 0x2000;
+    while (size > 0x400) {
+        const uint8_t *upper = bank + size / 2;
+        const uint8_t  fill  = upper[0];
+        if (fill != 0xFF && fill != 0x00) break;
+
+        bool blank = true;
+        for (uint32_t i = 1; i < size / 2 && blank; i++)
+            if (upper[i] != fill) blank = false;
+        if (!blank) break;
+
+        size /= 2;
+    }
+    return total - 0x2000 + size;
+}
+#endif
+
+// Is this chip select empty?
+//
+// Asking whether the data varies is not enough. An undriven bus settles to
+// 0xC0 here, but RP2350-E9 means a pad with a pull-down can hold the level it
+// was last driven to, so the first reads of an empty socket return whatever
+// the PREVIOUS bank put on the bus. A dump of an empty third socket looks like
+// "40 40 C0 C0 C0..." -- varying, and so mistaken for a chip.
+//
+// What no ROM does is return a different byte for the same address depending
+// on what was read just before it. A floating bus does exactly that, and it is
+// a direct test rather than an inference from the data's shape.
+//
+// Each address is read twice: once just after an address in a known-populated
+// bank holding one value, once just after an address holding a different one.
+// A real chip gives the same byte both times. A floating bus follows whichever
+// value was driven last.
+static bool bank_is_empty(int bank, int probe_bank) {
+    // Two addresses in the probe bank whose contents differ, to drive the bus
+    // to two different states.
+    const uint8_t va = cart_read_byte(probe_bank, 0x0000);
+    uint16_t ob = 0;
+    uint8_t  vb = va;
+    for (uint16_t o = 1; o < 0x2000 && vb == va; o = (uint16_t)(o + 37)) {
+        vb = cart_read_byte(probe_bank, o);
+        ob = o;
+    }
+    if (vb == va) {
+        // The probe bank reads the same everywhere, so the bus cannot be
+        // driven to two states and this test cannot say anything. Fall back
+        // to the shape of the data.
+        return false;
+    }
+
+    for (int j = 0; j < 24; j++) {
+        const uint16_t off = (uint16_t)((j * 0x0107 + 3) & 0x1FFF);
+
+        cart_read_byte(probe_bank, 0x0000);          // drive the bus to va
+        const uint8_t x = cart_read_byte(bank, off);
+
+        cart_read_byte(probe_bank, ob);              // and now to vb
+        const uint8_t y = cart_read_byte(bank, off);
+
+        if (x != y) return true;                     // follows history: empty
+    }
+    return false;
+}
+
 uint32_t cart_read(uint8_t *dst, uint32_t max_len) {
     cart_gpio_init();
+
+    // Cleared every time. Leaving it from the previous read made a short dump
+    // report banks it had not looked at, which hid the real fault.
+    cart_status.raw = cart_status.trimmed = 0;
+    cart_status.uniform_value = 0;
+    for (int i = 0; i < 4; i++) cart_status.banks[i] = '-';
 
     // Start from whichever chip select actually held the header. Normally 0,
     // but if the CS ordering differs from the assumed one this still dumps the
@@ -389,19 +513,69 @@ uint32_t cart_read(uint8_t *dst, uint32_t max_len) {
         //
         // 32 samples spread through the 8 KB, at prime-ish strides so a
         // pathologically repetitive ROM is unlikely to fool it.
-        const uint8_t first_sample = cart_read_byte(bank, 0x0000);
-        bool uniform = true;
-        for (int j = 1; j < 32 && uniform; j++) {
-            const uint16_t off = (uint16_t)((j * 0x0107) & 0x1FFF);
-            if (cart_read_byte(bank, off) != first_sample) uniform = false;
+        // Re-test anything that looks uniform before believing it.
+        //
+        // A missing chip reads the same value at every address, but so does a
+        // bus that has not settled -- and a stale value sampled 32 times is
+        // indistinguishable from an empty socket. That is what made the same
+        // cartridge read as 24 KB one run and 16 KB the next with no reboot
+        // between them.
+        //
+        // An absent chip is uniform every time, under any timing. A settling
+        // problem is not. So a uniform result is retried with a pause and a
+        // different set of addresses, and any variation at all means the chip
+        // is there.
+        bool    uniform      = true;
+        uint8_t first_sample = 0;
+        for (int attempt = 0; attempt < CART_EMPTY_RETRIES && uniform; attempt++) {
+            if (attempt) sleep_us(200);           // let the bus settle
+
+            // Different strides each time, so a ROM that happens to repeat at
+            // one stride is not mistaken for an empty socket twice over.
+            const uint16_t stride = (uint16_t)(0x0107 + attempt * 0x0053);
+            first_sample = cart_read_byte(bank, (uint16_t)(attempt * 7));
+            for (int j = 1; j < 48 && uniform; j++) {
+                const uint16_t off = (uint16_t)((j * stride) & 0x1FFF);
+                if (cart_read_byte(bank, off) != first_sample) uniform = false;
+            }
         }
-        if (uniform && i > 0) break;
+
+        // A uniform bank reading 0xFF or 0x00 is a real chip with a blank
+        // region: an empty socket floats to 0xC0 here, never to those.
+        if (uniform) cart_status.uniform_value = first_sample;
+
+        // Two independent signs of an empty socket, because each catches a
+        // case the other misses.
+        //
+        //   floating  the bus follows what was read before it -- catches a
+        //             socket whose first bytes are still latched from the
+        //             previous bank, which looks like varying data
+        //   uniform   every sample the same, and not an erased 0xFF/0x00 --
+        //             catches a socket that has settled to 0xC0 by the time
+        //             it is sampled
+        const bool blank_rom = (first_sample == 0xFF || first_sample == 0x00);
+        const bool floating  = (i > 0) && bank_is_empty(bank, first);
+
+        if (i > 0 && (floating || (uniform && !blank_rom))) break;
+
+        cart_status.banks[i] = floating ? 'F'
+                             : uniform  ? (blank_rom ? 'B' : 'U')
+                                        : 'P';
 
         for (uint32_t off = 0; off < 0x2000; off++) {
             if (total >= max_len) { cart_gpio_release(); return total; }
             dst[total++] = cart_read_byte(bank, (uint16_t)off);
         }
     }
+
+    cart_status.raw = total;
+#if CART_TRIM_MIRROR
+    total = trim_mirrored_tail(dst, total);
+#endif
+#if CART_TRIM_BLANK
+    total = trim_blank_tail(dst, total);
+#endif
+    cart_status.trimmed = total;
 
     // Done with the cartridge. Release the pins so the audio codec's I2C bus,
     // the debug UART and SPI1 go back to their normal owners for the rest of

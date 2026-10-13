@@ -23,6 +23,17 @@ int cart_probe_bytes(uint8_t *dst, int max);
 // than 0 means the chip select ordering differs from the assumed one.
 int cart_header_bank(void);
 
+// Diagnostics from the last cart_read(): the size before and after trimming,
+// and one character per chip select (P populated, B blank but real, U floating
+// so skipped, '-' not reached).
+struct CartReadStatus {
+    uint32_t raw;
+    uint32_t trimmed;
+    char     banks[5];
+    uint8_t  uniform_value;   // the repeated byte, when a bank looked uniform
+};
+extern CartReadStatus cart_status;
+
 #if ENABLE_MEGACART
 // Progress callback for a long dump: called with bytes done and the total.
 typedef void (*cart_progress_fn)(uint32_t done, uint32_t total);

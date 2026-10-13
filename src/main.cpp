@@ -378,6 +378,68 @@ static void eeprom_save(void) {
 }
 #endif  // ENABLE_ACTIVISION
 
+#if ENABLE_MEGACART
+// A megabyte through the shield takes a while; show how far it has got.
+static void cart_dump_progress(uint32_t done, uint32_t total) {
+    char msg[48];
+    snprintf(msg, sizeof(msg), "Reading cartridge... %lu of %lu KB",
+             (unsigned long)(done / 1024), (unsigned long)(total / 1024));
+    menu_message("CARTRIDGE", msg, nullptr, false);
+}
+#endif
+
+// Copy the cartridge in the shield to /coleco, as game.rom, game2.rom, ...
+//
+// Reads it the same way loading does, so a bank-switched cartridge is copied
+// whole rather than only its first 32 KB. Returns the name used, or nullptr.
+static const char *copy_cartridge_to_sd(void) {
+    static char path[64];
+
+    if (!cj_psram_ready()) return nullptr;
+
+    uint32_t len = 0;
+#if ENABLE_MEGACART
+    menu_message("COPY CARTRIDGE", "Checking for bank switching...", nullptr, false);
+    len = cart_read_banked(cj_psram_base(), cj_psram_bytes(), cart_dump_progress);
+#endif
+    if (len == 0) {
+        menu_message("COPY CARTRIDGE", "Reading cartridge...", nullptr, false);
+        len = cart_read(cj_psram_base(), cj_psram_bytes());
+    }
+    if (len == 0) return nullptr;
+
+    // First free name. f_stat rather than trying to open for writing, so an
+    // existing file is never truncated by the test itself.
+    FILINFO fno;
+    for (int n = 1; n <= 999; n++) {
+        if (n == 1) snprintf(path, sizeof(path), "/coleco/game.rom");
+        else        snprintf(path, sizeof(path), "/coleco/game%d.rom", n);
+        if (f_stat(path, &fno) != FR_OK) break;
+        if (n == 999) return nullptr;              // give up rather than loop
+    }
+
+    FIL f;
+    if (f_open(&f, path, FA_WRITE | FA_CREATE_NEW) != FR_OK) return nullptr;
+
+    uint32_t done = 0;
+    while (done < len) {
+        const UINT want = (len - done > 16384u) ? 16384u : (UINT)(len - done);
+        UINT bw = 0;
+        if (f_write(&f, cj_psram_base() + done, want, &bw) != FR_OK || bw == 0) {
+            f_close(&f);
+            return nullptr;
+        }
+        done += bw;
+
+        char msg[48];
+        snprintf(msg, sizeof(msg), "Writing... %lu of %lu KB",
+                 (unsigned long)(done / 1024), (unsigned long)(len / 1024));
+        menu_message("COPY CARTRIDGE", msg, path, false);
+    }
+    f_close(&f);
+    return (done == len) ? path : nullptr;
+}
+
 // Load a cartridge into PSRAM.
 //
 // Read in chunks rather than one call: a 1 MB read would tie up the SD driver
@@ -752,8 +814,15 @@ int main(void) {
     // Decide whether to offer the SD card as a USB drive before the device
     // stack comes up -- once tud_init() has run the port is already
     // enumerating, so this has to be settled first.
-    const bool msc_wanted = wait_for_msc_request();
-    usb_msc_set_enabled(msc_wanted);
+    // Holding Button 1 at boot means either "offer the SD card as a USB drive"
+    // or, with a cartridge fitted, "show me the boot menu". Which of the two
+    // is not known yet -- the cartridge cannot be probed this early and there
+    // is no display to ask on -- so the device stack is brought up ready for
+    // MSC either way, and switched off further down if the menu says
+    // otherwise. The alternative would be deciding after tud_init(), by which
+    // time the port is already enumerating as something.
+    const bool button_at_boot = wait_for_msc_request();
+    usb_msc_set_enabled(button_at_boot);
 
     usb_msc_init();
     blink(2);                       // device stack up
@@ -782,6 +851,60 @@ int main(void) {
     for (int i = 0; i < 300 && !host_ready; i++) sleep_ms(10);
 #endif
     blink(4);                       // USB host + audio running
+
+    // --- boot menu -------------------------------------------------------
+    //
+    // Only with a cartridge fitted: without one there is nothing to copy or
+    // load, and Button 1 keeps its old meaning of asking for USB drive mode.
+    bool want_msc  = button_at_boot;
+    bool skip_cart = false;
+
+    if (button_at_boot && cart_present()) {
+        for (;;) {
+            const int choice = menu_boot_options();
+
+            if (choice == BOOT_OPT_USB) {
+                want_msc  = true;
+                skip_cart = true;               // the PC owns the card
+                break;
+            }
+            if (choice == BOOT_OPT_LOAD) {
+                want_msc = false;
+                break;
+            }
+
+            // Copy the cartridge. Needs the card, so mount it here -- the
+            // usual mount further down has not happened yet.
+            want_msc = false;
+            usb_msc_set_enabled(false);
+
+            if (!sd_init() || f_mount(&fs, "", 1) != FR_OK) {
+                menu_wait_any_input("COPY FAILED", "Could not read the SD card.",
+                                    "Press any button.");
+                continue;
+            }
+            f_mkdir("/coleco");                 // harmless if it exists
+
+            const char *written = copy_cartridge_to_sd();
+            if (written) {
+                // Exact byte counts, not KB: a size that looks wrong needs to
+                // be checked against the real file, and rounding hides what
+                // the read and the trim each did.
+                // Bytes and KB: the exact figure is what gets compared
+                // against a known-good dump, the KB is what is easy to read.
+                char detail[48];
+                const unsigned long n = (unsigned long)cart_status.trimmed;
+                snprintf(detail, sizeof(detail), "%lu bytes (%lu KB)",
+                         n, n / 1024);
+                menu_wait_any_input("COPY COMPLETE", written, detail);
+            }
+            else
+                menu_wait_any_input("COPY FAILED",
+                                    "Could not copy the cartridge.",
+                                    "Press any button.");
+        }
+    }
+    usb_msc_set_enabled(want_msc);
 
     // --- SD card ---------------------------------------------------------
     if (!sd_init()) {
@@ -824,18 +947,8 @@ int main(void) {
 
     // --- Cartridge shield takes priority over the SD card ----------------
 #if ENABLE_CART_READER
-#if ENABLE_MEGACART
-    // A megabyte through the shield takes a while; show how far it has got.
-    auto cart_dump_progress = [](uint32_t done, uint32_t total) {
-        char msg[48];
-        snprintf(msg, sizeof(msg), "Reading cartridge... %lu of %lu KB",
-                 (unsigned long)(done / 1024), (unsigned long)(total / 1024));
-        menu_message("CARTRIDGE DETECTED", msg, nullptr, false);
-    };
-#endif
-
     menu_message("ADAFRUIT COLECOJAM", "Checking cartridge slot...", nullptr, false);
-    if (cart_present()) {
+    if (!skip_cart && cart_present()) {
         menu_message("CARTRIDGE DETECTED", "Reading cartridge ROM...", nullptr, false);
         const uint8_t *cart_base = cart_buffer();
 

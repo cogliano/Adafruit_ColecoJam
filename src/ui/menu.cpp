@@ -738,6 +738,214 @@ static bool edge_or_repeat(Repeat *r, uint16_t now, uint16_t mask) {
 // ---------------------------------------------------------------------------
 // Main loop
 // ---------------------------------------------------------------------------
+// Read the menu buttons from whichever device is to hand.
+//
+// Shared by the boot menu below and the waiting screen. The browser has its
+// own copy inline because it also folds in the screen saver's timing.
+static uint16_t boot_menu_buttons(void) {
+    uint16_t now = (uint16_t)(usb_host_raw_buttons(0) | usb_host_raw_buttons(1));
+    if (!gpio_get(PIN_BUTTON2)) now |= MENU_DOWN;
+    if (!gpio_get(PIN_BUTTON3)) now |= MENU_A;
+    if (!gpio_get(PIN_BUTTON1)) now |= MENU_START;
+    return now;
+}
+
+// Controllers, named rather than counted, as on the ROM browser.
+static void boot_menu_status(char *st, size_t n) {
+    int o = 0;
+    for (int i = 0; i < 2; i++) {
+        const char *name = usb_host_pad_name(i);
+        if (!name) continue;
+        o += snprintf(st + o, n - (size_t)o, "%sP%d %s", o ? "  " : "", i + 1, name);
+    }
+    if (usb_host_keyboard_connected())
+        o += snprintf(st + o, n - (size_t)o, "%sKB", o ? "  " : "");
+    if (!o) snprintf(st, n, "No controller connected");
+}
+
+static void boot_menu_frame(int sel, const char *const *items, int count) {
+    clear_dim(COL_BG);
+    draw_logo(LOGO_MENU_X, LOGO_MENU_Y);
+
+    // Build ID in the title band, same place and colour as the browser.
+    {
+        const char *b = ACJ_BUILD_ID;
+        const int x = FB_WIDTH - (int)strlen(b) * CHAR_W - 4;
+        const int y = (LOGO_H - CHAR_H) / 2;
+        for (int i = 0; b[i]; i++)
+            draw_char(x + i * CHAR_W, y, b[i], COL_DIM, RGB565(0, 0, 0), false);
+    }
+    draw_text(0, LIST_TOP_ROW - 1, "SELECT OPTION:", COL_ACCENT, COL_BG, false);
+
+    for (int i = 0; i < count; i++) {
+        const bool on = (i == sel);
+        char line[40];
+        snprintf(line, sizeof(line), "%c %d: %s",
+                 on ? '>' : ' ', i + 1, items[i]);
+        draw_text(0, LIST_TOP_ROW + 1 + i * 2, line,
+                  on ? COL_SEL_FG : COL_TEXT,
+                  on ? COL_SEL_BG : COL_BG, true);
+    }
+
+    char st[48];
+    boot_menu_status(st, sizeof(st));
+    draw_text_centered(ROW_STATUS, st, COL_ACCENT, COL_BG, false);
+}
+
+int menu_boot_options(void) {
+    static const char *const items[3] = {
+        "Load cartridge",            // BOOT_OPT_LOAD
+        "Copy cartridge",            // BOOT_OPT_COPY
+        "USB drive mode",            // BOOT_OPT_USB
+    };
+    int sel = BOOT_OPT_LOAD;         // the default
+
+    // Button 1 is still held from boot -- that is how we got here -- so
+    // nothing is acted on until everything has been released.
+    bool swallow = true;
+    Repeat rpt = { 0, get_absolute_time(), 0 };
+    bool need_redraw = true;
+
+#if MENU_SAVER_TIMEOUT_S > 0
+    // The same saver as the ROM browser. The logo sits in the same place on
+    // both screens, so it fades away and sets off from exactly where it is.
+    absolute_time_t last_input  = get_absolute_time();
+    absolute_time_t saver_since = last_input;
+    bool            saver       = false;
+    int             saver_steps = 0;
+    bool            saver_begun = false;
+#endif
+
+    for (;;) {
+        usb_host_task();
+        usb_msc_task();
+
+        if (need_redraw) {
+            boot_menu_frame(sel, items, 3);
+            need_redraw = false;
+        }
+
+        // A pad plugged in while this is on screen should appear, so the
+        // status is checked each pass and the frame redrawn when it changes.
+        {
+            static char last_status[48];
+            char st[sizeof(last_status)];
+            boot_menu_status(st, sizeof(st));
+            if (strcmp(st, last_status) != 0) {
+                // memcpy of the whole buffer rather than strncpy of one byte
+                // less: the two are the same size and snprintf has already
+                // terminated st, so this copies the terminator with it.
+                // strncpy would stop one short and leave termination depending
+                // on the destination having started out zeroed.
+                memcpy(last_status, st, sizeof(last_status));
+                need_redraw = true;
+            }
+        }
+
+        uint16_t now = boot_menu_buttons();
+        if (swallow) {
+            if (now == 0) swallow = false;
+            else { now = 0; rpt.prev = 0; }
+        }
+
+#if MENU_SAVER_TIMEOUT_S > 0
+        {
+            const absolute_time_t t = get_absolute_time();
+            if (now != 0) {
+                last_input = t;
+                if (saver) {
+                    saver       = false;
+                    need_redraw = true;
+                    now         = 0;        // the waking press does no more
+                    rpt.prev    = 0;
+                    swallow     = true;     // ...until it is released
+                }
+            } else if (!saver &&
+                       absolute_time_diff_us(last_input, t) >=
+                           (int64_t)MENU_SAVER_TIMEOUT_S * 1000000) {
+                saver       = true;
+                saver_since = t;
+                saver_steps = 0;
+                saver_begun = false;
+            }
+
+            if (saver) {
+                const uint32_t frame = video_frames_rendered();
+                while (video_frames_rendered() == frame) {
+                    usb_host_task();
+                    usb_msc_task();
+                    tight_loop_contents();
+                }
+                const uint32_t since = (uint32_t)
+                    (absolute_time_diff_us(saver_since, get_absolute_time()) / 1000);
+                const uint32_t fade_ms  = (uint32_t)MENU_SAVER_FADE_MS;
+                const uint32_t pause_ms = (uint32_t)MENU_SAVER_PAUSE_MS;
+
+                if (since < fade_ms) {
+                    const int want = (int)((uint64_t)since * SAVER_FADE_STEPS
+                                           / (fade_ms ? fade_ms : 1u));
+                    while (saver_steps < want && saver_steps < SAVER_FADE_STEPS) {
+                        saver_steps++;
+                        saver_fade_step(saver_steps, LOGO_MENU_X, LOGO_MENU_Y);
+                    }
+                } else if (since < fade_ms + pause_ms) {
+                    if (saver_steps < SAVER_FADE_STEPS) {
+                        saver_steps = SAVER_FADE_STEPS;
+                        saver_clear_around_logo(LOGO_MENU_X, LOGO_MENU_Y);
+                    }
+                } else if (!saver_begun) {
+                    saver_begun = true;
+                    saver_clear_around_logo(LOGO_MENU_X, LOGO_MENU_Y);
+                    draw_saver(0, true);
+                } else {
+                    draw_saver(since - fade_ms - pause_ms, false);
+                }
+                continue;
+            }
+        }
+#endif
+
+        if (edge_or_repeat(&rpt, now, MENU_UP)) {
+            sel = (sel + 2) % 3;
+            need_redraw = true;
+        }
+        if (edge_or_repeat(&rpt, now, MENU_DOWN)) {
+            sel = (sel + 1) % 3;
+            need_redraw = true;
+        }
+
+        const bool choose = ((now & MENU_A)     && !(rpt.prev & MENU_A)) ||
+                            ((now & MENU_START) && !(rpt.prev & MENU_START));
+        rpt.prev = now;
+        if (choose) return sel;
+
+        sleep_ms(5);
+    }
+}
+
+void menu_wait_any_input(const char *title, const char *l1, const char *l2) {
+    menu_message(title, l1, l2, false);
+    draw_text_centered(ROW_HELP, "Press any button to continue",
+                       COL_DIM, COL_BG, false);
+
+    // Wait for everything to be released first, so the press that got here
+    // does not immediately dismiss the message.
+    for (;;) {
+        usb_host_task();
+        usb_msc_task();
+        if (boot_menu_buttons() == 0) break;
+        sleep_ms(5);
+    }
+    for (;;) {
+        usb_host_task();
+        usb_msc_task();
+        if (boot_menu_buttons() != 0) break;
+        sleep_ms(5);
+    }
+    // And let go again, so the press is not seen twice.
+    while (boot_menu_buttons() != 0) { usb_host_task(); usb_msc_task(); sleep_ms(5); }
+}
+
 bool menu_select_rom(char *out_path, size_t out_len) {
 #if MENU_SAVER_TIMEOUT_S > 0
     // Screen saver state. last_input is bumped by any pad or board button

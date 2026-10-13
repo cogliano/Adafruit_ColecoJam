@@ -117,6 +117,90 @@ so a cartridge's header is visible from the start whatever the switchable
 window holds. The switchable window begins at bank 0 and games set it
 themselves.
 
+### Boot menu
+
+Holding **Button 1** during start-up **with a cartridge fitted** shows:
+
+```
+SELECT OPTION:
+> 1: Load cartridge
+  2: Copy cartridge
+  3: USB drive mode
+```
+
+The build ID sits in the title band and the controller line along the bottom,
+both as on the ROM browser. The controller line is rechecked each pass, so a
+pad plugged in while this screen is up appears straight away.
+
+Button 2 moves, Button 3 selects; a pad works too once it has enumerated.
+Option 1 is the default, and the screen saver runs here as it does on the ROM
+browser -- the logo is in the same place on both, so it fades away and sets off
+from exactly where it already is. Without a cartridge fitted, Button 1 keeps its old
+meaning and goes straight to USB drive mode.
+
+**Copy cartridge** writes the cartridge to `/coleco` as `game.rom`, or
+`game2.rom`, `game3.rom` and so on if that name is taken.
+
+The copy screen reports exact byte counts and what the reader made of each
+chip select -- `read 24576, saved 20480, banks PPBU`. P is a populated chip, B
+a uniform 0xFF/0x00 bank treated as a real but blank chip, U a uniform bank
+treated as an empty socket, and `-` a select never reached.
+
+An empty socket is detected two ways, because neither alone is sufficient on
+this hardware.
+
+The direct test is whether the bus **follows what was read before it**. An
+undriven bus settles to 0xC0, but RP2350-E9 means a pad with a pull-down can
+hold the level it was last driven to, so the first bytes of an empty socket are
+whatever the previous bank put on the bus -- a dump reading `40 40 C0 C0 C0...`
+looks like varying data and gets mistaken for a chip. No ROM returns a
+different byte for the same address depending on what preceded it, so each
+address is read twice, once after driving the bus to one value and once to
+another. A real chip answers the same both times.
+
+The second test is the shape of the data, which catches a socket that has
+already settled to a constant 0xC0 by the time it is sampled.
+
+A bank that reads as one repeated value is re-tested before it is believed.
+An absent chip is uniform every time under any timing; a bus that has not
+settled is not, and a stale value sampled repeatedly is indistinguishable from
+an empty socket. That is what made one cartridge read as 24 KB on one run and
+16 KB on the next with no reboot between them. `CART_EMPTY_RETRIES` sets how
+many passes, each with a pause and different sample addresses.
+
+A bank reading as one repeated value is not enough on its own to call it empty.
+An empty socket on this hardware settles at 0xC0, never 0xFF or 0x00, because
+nothing is driving those. A chip whose upper region is unused reads as solid
+0xFF, so treating uniform-as-empty drops the end of a cartridge: a 20 KB cart
+whose third chip is mostly blank comes back as 16 KB.
+
+Two kinds of tail are trimmed, because a 20 KB cartridge can be built two
+ways. `CART_TRIM_MIRROR 0` and `CART_TRIM_BLANK 0` keep whatever the hardware
+returns.
+
+An **erased** tail is an 8 KB chip in the last socket with only its lower half
+programmed: the rest reads as solid 0xFF, or 0x00 on a mask ROM. Only those two
+values count as erased -- any other repeated byte is data.
+
+A **mirrored** tail is trimmed first. Chip selects are 8 KB wide, so a read is
+always a multiple of 8 KB, but a cartridge can end with a smaller chip: a 4 KB
+chip has A12 unconnected and answers to both halves of its window, so a 20 KB
+cartridge reads back as 24 KB with the last 4 KB a copy of the 4 KB before it.
+The final bank is halved while its two halves match, down to a floor of 1 KB,
+which also covers 2 KB chips. Only the last bank is considered -- a mirrored
+bank in the middle would mean something stranger than a small chip, and
+trimming there would corrupt everything after it. `CART_TRIM_MIRROR 0` keeps
+whatever the hardware returns. It reads the
+cartridge exactly as loading does, so a bank-switched one is copied whole
+rather than only its first 32 KB. The result is shown with the name used, and
+any button returns to the menu.
+
+The decision about USB drive mode has to be made before `tud_init()`, since
+after that the port is already enumerating as something. The cartridge cannot
+be probed that early and there is no display to ask on, so the device stack
+comes up ready for MSC whenever Button 1 is held, and is switched off again if
+the menu turns out to say otherwise.
+
 ### MegaCart cartridges in the shield
 
 Bank-switched cartridges can be read through the shield as well as from SD.

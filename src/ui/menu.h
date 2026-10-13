@@ -27,3 +27,15 @@ void menu_debug_line(int row, const char *text);
 // SD card is mounted as a USB drive, and is compiled out when TITLE_SEQUENCE
 // is 0. Call before menu_select_rom(), which then fades the menu up.
 void menu_title_sequence(void);
+
+// Boot options menu, shown when a cartridge is fitted and Button 1 is held
+// during start-up. Returns one of these; BOOT_OPT_LOAD is the default.
+enum {
+    BOOT_OPT_LOAD = 0,
+    BOOT_OPT_COPY = 1,
+    BOOT_OPT_USB  = 2,
+};
+int menu_boot_options(void);
+
+// Hold a message until any button is pressed and released.
+void menu_wait_any_input(const char *title, const char *l1, const char *l2);
